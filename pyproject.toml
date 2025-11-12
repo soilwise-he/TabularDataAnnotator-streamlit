@@ -1,7 +1,7 @@
 [project]
 name = "dataannotator"
 version = "0.1.0"
-description = "Add your description here"
+description = "Streamlit tool for annotation of datasets"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
