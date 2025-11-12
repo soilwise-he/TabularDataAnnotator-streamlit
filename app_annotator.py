@@ -18,7 +18,7 @@ from tqdm import tqdm
 import requests
 
 st.logo(
-    'Logo\SWlogocolor.svg',
+    'Logo/SWlogocolor.svg',
     link="https://soilwise-he.eu/",
 )
 
