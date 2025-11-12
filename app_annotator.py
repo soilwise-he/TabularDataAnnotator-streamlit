@@ -17,6 +17,10 @@ from sklearn.preprocessing import normalize
 from tqdm import tqdm
 import requests
 
+st.logo(
+    'Logo\SWlogocolor.svg',
+    link="https://soilwise-he.eu/",
+)
 
 # Clear Cache Button aligned to the right
 col1, col2 = st.columns([5, 1])  # Adjust column proportions as needed
