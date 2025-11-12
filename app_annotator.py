@@ -16,6 +16,7 @@ import numpy as np
 from sklearn.preprocessing import normalize
 from tqdm import tqdm
 import requests
+import ast
 
 st.logo(
     'Logo/SWlogocolor.svg',
@@ -998,7 +999,7 @@ if uploaded_df is not None:
             if r.get('element'):
                 col['titles'] = [r['element']]
             if r.get('element_uri'):
-                col['propertyUrl'] = [element for _,element in r['element_uri'].items()]
+                col['propertyUrl'] = [element for _,element in ast.literal_eval(r['element_uri']).items()]
             if r.get('unit'):
                 col['unit'] = r['unit']
             if r.get('method'):
