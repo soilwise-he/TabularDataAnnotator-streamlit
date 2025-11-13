@@ -727,7 +727,7 @@ if uploaded_df is not None:
 
     st.markdown("### Data preview (first 5 rows)")
     st.dataframe(uploaded_df.head(5))
-    if 'metadata_df' not in st.session_state: #or st.session_state.get('source_df_id') != id(uploaded_df):
+    if 'metadata_df' not in st.session_state or st.session_state.get('source_df_id') != id(uploaded_df):
         meta_df = build_metadata_df_from_df(uploaded_df)
         st.session_state['metadata_df'] = meta_df
         st.session_state['source_df_id'] = id(uploaded_df)
