@@ -102,7 +102,16 @@ def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
 def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
     # Accept CSV or JSON (tableschema or csvw)
     name = uploaded_file.name.lower()
-    text = uploaded_file.getvalue().decode("utf-8")
+
+    #text = uploaded_file.getvalue().decode("utf-8")
+    raw = uploaded_file.getvalue()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        import chardet
+        enc = chardet.detect(raw)["encoding"] or "cp1252"
+        text = raw.decode(enc, errors="replace")
+    
     try:
         if name.endswith('.csv'):
             df = pd.read_csv(io.StringIO(text))
