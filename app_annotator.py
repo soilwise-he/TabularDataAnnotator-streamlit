@@ -17,6 +17,8 @@ from sklearn.preprocessing import normalize
 from tqdm import tqdm
 import requests
 import ast
+import csv
+
 
 st.logo(
     'Logo/SWlogocolor.svg',
@@ -98,12 +100,8 @@ def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(cols)
 
-@st.cache_resource
-def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
-    # Accept CSV or JSON (tableschema or csvw)
-    name = uploaded_file.name.lower()
-
-    #text = uploaded_file.getvalue().decode("utf-8")
+@st.cache_resource()
+def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
     raw = uploaded_file.getvalue()
     try:
         text = raw.decode("utf-8")
@@ -111,10 +109,24 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
         import chardet
         enc = chardet.detect(raw)["encoding"] or "cp1252"
         text = raw.decode(enc, errors="replace")
+
+    dialect_uploaded = csv.Sniffer().sniff(text, delimiters=[",", ";", "\t", "|"])
+    separator_uploaded = dialect_uploaded.delimiter
+    df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
+    return df
+
+@st.cache_resource
+def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
+    # Accept CSV or JSON (tableschema or csvw)
+    name = uploaded_file.name.lower()
+
+    #text = uploaded_file.getvalue().decode("utf-8")
+    raw = uploaded_file.getvalue()
     
     try:
         if name.endswith('.csv'):
-            df = pd.read_csv(io.StringIO(text))
+            df = read_csv_with_sniffer(uploaded_file)
+            st.write(df.head())
             # Expect columns: name, element, unit, method, datatype, description
             if "name" not in df.columns:
                 st.error("CSV metadata must contain a 'name' column matching column names in the data.")
@@ -123,6 +135,7 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
             result = df.rename(columns={c: c.lower() for c in df.columns})
             return result
         elif name.endswith('.json'):
+            text = raw.decode("utf-8")
             j = json.loads(text)
             # TableSchema style
             if isinstance(j, dict) and j.get('fields'):
@@ -162,7 +175,7 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
         return None
 
 
-def apply_new_metadata_info(metadata_df: pd.DataFrame, current_meta: pd.DataFrame, overwrite = False) -> pd.DataFrame:
+def apply_new_metadata_info(metadata_df: pd.DataFrame, current_meta: pd.DataFrame, overwrite = 'no_overwrite') -> pd.DataFrame:
     # Function to apply new metadata info from metadata_df to current_meta
 
     # metadata_df expected to contain 'name' column
@@ -176,16 +189,30 @@ def apply_new_metadata_info(metadata_df: pd.DataFrame, current_meta: pd.DataFram
             for col in ['datatype', 'element', 'unit', 'method', 'description','element_uri']:
                 current_value = md.at[idx, col]
                 
-                if not overwrite and pd.notna(current_value) and current_value not in [None, ""]:
+                if overwrite == 'no_overwrite' and pd.notna(current_value) and current_value not in [None, ""]:
                     continue
-                if col in row and pd.notna(row[col]) and row[col] != "":
+                if (overwrite == 'yes' and col in row and pd.notna(row[col]) and row[col] != "") or (overwrite == 'yes_incl_blanks'and col in row):
                     value = row[col]
                     if isinstance(value, dict):
                         md.loc[idx, col] = str(value)  # Convert dict to string
                     else:
                         md.loc[idx, col] = value
+                    continue
+
     return md
 
+@st.cache_resource
+def read_context_file(contextfile) -> str:
+    context_text=""
+    if contextfile.type == "application/pdf":
+        reader = PdfReader(contextfile)
+        for page in reader.pages:
+            context_text += page.extract_text() + "\n"
+    elif contextfile.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        doc = docx.Document(contextfile)
+        for para in doc.paragraphs:
+            context_text += para.text + "\n"
+    return context_text
 
 def download_bytes(content: bytes, filename: str, mime: str = 'application/octet-stream'):
     st.download_button(label=f"Download {filename}", data=content, file_name=filename, mime=mime)
@@ -652,7 +679,7 @@ with col1:
         filename = uploaded.name if uploaded else None
         if uploaded:
             try:
-                uploaded_df = pd.read_csv(uploaded)
+                uploaded_df = read_csv_with_sniffer(uploaded)
             except Exception as e:
                 st.error(f"Failed to read CSV: {e}")
 
@@ -662,12 +689,12 @@ with col1:
         filename = obs_file.name if obs_file else None
         if site_file:
             try:
-                site_df = pd.read_csv(site_file)
+                site_df = read_csv_with_sniffer(site_file)
             except Exception as e:
                 st.error(f"Failed to read sites CSV: {e}")
         if obs_file:
             try:
-                obs_df = pd.read_csv(obs_file)
+                obs_df = read_csv_with_sniffer(obs_file)
             except Exception as e:
                 st.error(f"Failed to read observations CSV: {e}")
 
@@ -724,12 +751,13 @@ if mode == 'linked' and site_df is not None and obs_df is not None:
         except Exception as e:
             st.error(f"Failed to merge tables: {e}")
 
-# If metadata import provided, parse it
-imported_metadata_df = None
-if metadata_file is not None:
-    imported_metadata_df = import_metadata_from_file(metadata_file)
-    if imported_metadata_df is not None:
-        st.success("Imported metadata file parsed.")
+with col2:
+    # If metadata import provided, parse it
+    imported_metadata_df = None
+    if metadata_file is not None:
+        imported_metadata_df = import_metadata_from_file(metadata_file)
+        if imported_metadata_df is not None:
+            st.success("Imported metadata file parsed.")
 
 # If a dataframe is present (uploaded or merged), show preview and build metadata
 if uploaded_df is not None:
@@ -761,6 +789,7 @@ if uploaded_df is not None:
         meta_df_description = st.session_state.get('metadata_df')
         edited_description = st.data_editor(meta_df_description[['name','description']],
                                             num_rows="dynamic",
+                                            disabled='name',
                                             #height ='stretch',
                                             )
     
@@ -792,14 +821,7 @@ if uploaded_df is not None:
                 if uploaded_contextfiles:
                     for i, contextfile in enumerate(uploaded_contextfiles):
                         context_text=""
-                        if contextfile.type == "application/pdf":
-                            reader = PdfReader(contextfile)
-                            for page in reader.pages:
-                                context_text += page.extract_text() + "\n"
-                        elif contextfile.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                            doc = docx.Document(contextfile)
-                            for para in doc.paragraphs:
-                                context_text += para.text + "\n"
+                        context_text = read_context_file(contextfile)
                         # Use a unique key for each text area to store its state
                         key = f"context_text_{i}"
                         context_text = st.session_state.get(key, context_text)  # Load existing state or default
@@ -837,19 +859,22 @@ if uploaded_df is not None:
                 description_df = pd.DataFrame(
                     list(AI_descriptions.items()), columns=["name", "description"]
                 )
+
                 st.session_state["AI_var_descriptions"] = description_df
 
             if "AI_var_descriptions" in st.session_state:
                 AI_var_df = st.session_state.get('AI_var_descriptions')
                 st.subheader("Structured Variable Descriptions")
                 st.caption("Please, feel free to edit the generated descriptions before approving them. By deleting the content of a description, the original description will be kept.")
-                edited_AI_Var = st.data_editor(AI_var_df, width='stretch')
-                st.session_state["AI_var_descriptions"] = edited_AI_Var
+                edited_AI_Var = st.data_editor(AI_var_df, width='stretch',disabled='name',key="preview_desc_editor")
+                if not edited_AI_Var.equals(AI_var_df):
+                    st.session_state["AI_var_descriptions"] = edited_AI_Var
+                    st.rerun() # Not uptimal, but necessary to update the edited df in session_state. Bug is know in streamlit community
                 approve_AI = st.button("✅ Approve and overwrite description with generated content", key="copy_AI_descriptions_button")
                 if approve_AI:
                     # overwrite descriptions in main metadata df
                     meta_df = st.session_state.get('metadata_df')
-                    meta_df_added = apply_new_metadata_info(edited_AI_Var, meta_df,overwrite = True)
+                    meta_df_added = apply_new_metadata_info(edited_AI_Var, meta_df,overwrite = 'yes')
                     st.session_state['metadata_df'] = meta_df_added
                     st.info("✅ Descriptions updated in main metadata table.")
 
@@ -916,7 +941,7 @@ if uploaded_df is not None:
         selected_rows = edited_df[edited_df["Selected"]].copy()
 
         # Drop duplicates while preserving original order of 'query'
-        unique_queries = selected_rows["query"].drop_duplicates()
+        unique_queries = edited_df["query"].drop_duplicates()
 
         if not selected_rows.empty:
             st.markdown("#### -> Selected Rows")
@@ -929,6 +954,16 @@ if uploaded_df is not None:
                     "uri": lambda x: list(set(x))     # use set() to keep unique URIs
                 })
             )
+
+            orig_queries = list(unique_queries)
+            missing = [q for q in orig_queries if q not in summary_df["query"].values]
+            if missing:
+                df_missing = pd.DataFrame({
+                    "query": missing,
+                    "label": [ [] for _ in missing ],
+                    "uri":   [ [] for _ in missing ]
+                })
+                summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
 
             summary_df["element_uri"] = summary_df.apply(
                 lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
@@ -946,7 +981,7 @@ if uploaded_df is not None:
             
             summary_df = summary_df.rename(columns={"query": "name","label":"element"})
 
-            st.session_state['metadata_df'] = apply_new_metadata_info(summary_df, st.session_state['metadata_df'], overwrite=True)
+            st.session_state['metadata_df'] = apply_new_metadata_info(summary_df, st.session_state['metadata_df'], overwrite='yes_incl_blanks')
 
         else:
             st.info("No rows selected.")
