@@ -5,6 +5,7 @@ description = "Streamlit tool for annotation of datasets"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "chardet>=5.2.0",
     "faiss-cpu>=1.12.0",
     "openai>=2.7.2",
     "openpyxl>=3.1.5",
