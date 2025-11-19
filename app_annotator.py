@@ -799,10 +799,10 @@ if uploaded_df is not None:
 
 
             container_3 = st.empty()
-            button_A = container_3.button('ℹ️')
-            if button_A:
+            button_A_3 = container_3.button('ℹ️  ')
+            if button_A_3:
                 container_3.empty()
-                button_B = container_3.button("ℹ️ Attention: Your header names and context text will be securely sent to an external source to auto generate descriptions. Please avoid including sensitive or personal information in the context files or variable names.")
+                button_B_3 = container_3.button("ℹ️ Attention: Your header names and context text will be securely sent to an external source to auto generate descriptions. Please avoid including sensitive or personal information in the context files or variable names.")
             
             st.markdown("**add some context files to start generation of descriptions with the help of an LLM**")
             uploaded_contextfiles = st.file_uploader("Upload context files", type=['pdf','doc','docx'], key='context_upload', accept_multiple_files=True)
