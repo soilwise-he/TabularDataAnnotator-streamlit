@@ -632,11 +632,11 @@ with st.sidebar.expander("LLM Provider", expanded=True):
             'callfunction': get_response_OpenAI,
             'help_key_creation': 'https://platform.openai.com/account/api-keys',
         },
-        "Apertus": {
-            'key' : st.secrets.get("apertus", {}).get("api_key"),
-            'callfunction': get_response_Apertus,
-            'help_key_creation': 'https://platform.publicai.co/settings/api-keys',
-        },
+        # "Apertus": {
+        #     'key' : st.secrets.get("apertus", {}).get("api_key"),
+        #     'callfunction': get_response_Apertus,
+        #     'help_key_creation': 'https://platform.publicai.co/settings/api-keys',
+        # },
         "Test_Wrong": {
             'key' : st.secrets.get("test", {}).get("api_key"),
             'callfunction': None,
