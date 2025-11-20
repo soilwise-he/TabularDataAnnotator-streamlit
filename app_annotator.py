@@ -668,6 +668,42 @@ with st.sidebar.expander("LLM Provider", expanded=True):
         st.session_state.pop("openai_client", None)
         st.session_state.pop("apertus_client", None)
 
+with st.sidebar:
+
+    st.markdown("""
+    ### 🌱 Let’s improve SoilWise together!
+
+    This tool is part of the Horizon Europe **SoilWise** project, and your input is essential for making it truly useful in real-world contexts.  
+    If you’d like to discuss the functionalities, share your experiences, or explore collaboration, we’d be glad to hear from you.
+
+    **💬 Reach out — your insights matter.**
+    """)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(
+            """
+            <a href="mailto:max.vercruyssen@vlaanderen.be" target="_blank">
+                <button style="padding:10px 18px; border-radius:8px; height: 5rem; background-color:#58a9f8; color:white; border:none; cursor:pointer;">
+                    Email me
+                </button>
+            </a>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col2:
+        st.markdown(
+            """
+            <a href="https://outlook.office.com/bookwithme/user/ab3771ccfeed4c5c83ca7a43d657865d@vlaanderen.be?" target="_blank">
+                <button style="padding:10px 18px; border-radius:8px;height: 5rem;  background-color:#50c082; color:white; border:none; cursor:pointer;">
+                    Book a meeting
+                </button>
+            </a>
+            """,
+            unsafe_allow_html=True
+        )
 
 # File upload UI
 col1, col2 = st.columns([1, 1])
@@ -770,11 +806,10 @@ if uploaded_df is not None:
         st.session_state['source_df_id'] = id(uploaded_df)
 
     # allow user to import metadata and apply to current
-    if imported_metadata_df is not None:
+    if imported_metadata_df is not None or st.session_state.get('metadata_df_id') != id(imported_metadata_df):
         #if st.button("Apply imported metadata to current columns"):
-        st.session_state['metadata_df'] = apply_new_metadata_info(imported_metadata_df, st.session_state['metadata_df'])
-
-
+        st.session_state['metadata_df'] = apply_new_metadata_info(imported_metadata_df, st.session_state['metadata_df'],overwrite='yes')
+        st.session_state['metadata_df_id'] = id(imported_metadata_df)
 
     st.divider()
 
