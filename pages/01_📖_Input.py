@@ -3,38 +3,29 @@ import pandas as pd
 import io
 import json
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict,Optional, Sequence
 import os
 from PyPDF2 import PdfReader
 import docx
 import hashlib
 from openai import OpenAI
 import re
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from sklearn.preprocessing import normalize
-from tqdm import tqdm
+
 import requests
-import ast
+
 import csv
+from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo, add_clear_cache_button
+
+import html
+import re
+from bs4 import BeautifulSoup
+
+from urllib.parse import urlparse
+import zipfile
 
 
-st.logo(
-    'Logo/SWlogocolor.svg',
-    link="https://soilwise-he.eu/",
-)
-
-# Clear Cache Button aligned to the right
-col1, col2 = st.columns([5, 1])  # Adjust column proportions as needed
-
-with col2:
-    if st.button("🔄 Clear Cache and Restart"):
-        # Clear session state
-        for key in st.session_state.keys():
-            del st.session_state[key]
-        # Rerun the app
-        st.rerun()
+add_Soilwise_logo()
+add_clear_cache_button(key_prefix="input_page")
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
@@ -42,6 +33,13 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
 
+
+def filename_from_url(url: str) -> str:
+    filename = urlparse(url).path.split('/')[-1]
+    if filename=="content":
+        url_strip = url[:-len("/content")]
+        filename=filename_from_url(url_strip)
+    return filename
 
 def detect_column_type_from_series(s: pd.Series, sample_size: int = 200) -> str:
     # sample values (non-null, up to sample_size)
@@ -100,22 +98,23 @@ def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(cols)
 
-@st.cache_resource()
-def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
-    raw = uploaded_file.getvalue()
+@st.cache_data()
+def read_csvBytes_with_sniffer(raw:bytes) -> pd.DataFrame:
+    
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         import chardet
         enc = chardet.detect(raw)["encoding"] or "cp1252"
         text = raw.decode(enc, errors="replace")
 
-    dialect_uploaded = csv.Sniffer().sniff(text, delimiters=[",", ";", "\t", "|"])
+    sample = text[:65536]  # first 64KB is usually enough
+    dialect_uploaded = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
     separator_uploaded = dialect_uploaded.delimiter
     df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
     return df
 
-@st.cache_resource
+@st.cache_data()
 def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
     # Accept CSV or JSON (tableschema or csvw)
     name = uploaded_file.name.lower()
@@ -125,7 +124,8 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
     
     try:
         if name.endswith('.csv'):
-            df = read_csv_with_sniffer(uploaded_file)
+            raw = uploaded_file.getvalue()
+            df = read_csvBytes_with_sniffer(raw)
             st.write(df.head())
             # Expect columns: name, element, unit, method, datatype, description
             if "name" not in df.columns:
@@ -405,142 +405,6 @@ def generate_descriptions_with_LLM(var_list: List[str], context: str, human_desc
 
     return variable_descriptions
 
-@st.cache_resource
-def load_sentence_model(modelname="all-MiniLM-L6-v2"):
-    with st.spinner(f"🔄 Loading embedding model '{modelname}'... This may take a few seconds."):
-        model = SentenceTransformer(modelname)
-    return model
-
-@st.cache_resource
-def load_vocab_indexes(modelname="all-MiniLM-L6-v2"):
-    """Load FAISS indexes and associated metadata."""
-    with st.spinner(f"🔄 Loading FAISS indexes and vocabulary for '{modelname}'..."):
-        
-        # Loading in FAISS indexes of preprocessed vocab embeddings
-        index_lib = faiss.read_index(f"data/vocabCombined-{modelname.replace('/','--')}.index")
-
-        # Loading library
-        meta_data_lib = np.load(
-            f"data/vocabCombined-{modelname.replace('/','--')}-meta.npz", allow_pickle=True
-        )
-        # Retrieving dictionairy with key index ID corresponding FAISS index
-        meta_data_dict = meta_data_lib["id_to_meta"].item()
-        # """
-        #     structure of meta_data_dict:
-        #     {
-        #         0: {
-        #             "uri": "...",
-        #             "label": "...",
-        #             "definition": "[...]",
-        #             "QC_label": "prefLabel" or "altLabel"
-        #         },
-        #         1: { ... },
-        #         ...
-        # """
-
-    return index_lib, meta_data_dict
-
-def embed_vocab(word, definition=None, alpha=0.4):
-
-    """
-        Generates a semantic embedding for a given word, optionally influenced by its definition.
-
-        Parameters:
-        ----------
-        word : str
-            The target word to embed.
-        definition : str or list, optional
-            A textual definition or list of definitions to enrich the word embedding.
-            If None or invalid, the word embedding is used alone.
-        alpha : float, default=0.8
-            Weighting factor between the word and definition embeddings.
-            - alpha = 1.0: use only the word embedding
-            - alpha = 0.0: use only the definition embedding
-            - 0.0 < alpha < 1.0: blend both embeddings
-
-        Returns:
-        -------
-        np.ndarray
-            A normalized vector representing the blended embedding.
-    """
-
-    # encode separately
-    emb_word = model.encode(word, normalize_embeddings=True)
-    
-    # definition embedding
-    if definition and isinstance(definition, str) and definition.strip() and definition.lower() != 'nan':
-        emb_def = model.encode(definition, normalize_embeddings=True)
-    elif isinstance(definition, list) and len(definition) > 0:
-        emb_def_list = model.encode(definition, normalize_embeddings=True)
-        emb_def = emb_def_list.mean(axis=0)
-    else:
-        emb_def = emb_word
-    
-    # weighted combination
-    vec = alpha * emb_word + (1 - alpha) * emb_def
-    vec = normalize(vec.reshape(1, -1)).squeeze()
-    return alpha * emb_word + (1 - alpha) * emb_def
-
-def find_nearest_vocab(df_descriptions, index_lib, meta_data_dict, k_nearest=4):
-    """
-    Find nearest vocabulary matches for each variable description
-    using both prefLabel and altLabel indexes.
-    Deduplicate URIs with preference for prefLabel matches.
-    Return all unique URIs sorted by similarity.
-    """
-    matches = []
-
-    for _, row in tqdm(df_descriptions.iterrows(), total=len(df_descriptions), desc="🔍 Matching with vocabulary"):
-        query = row["name"]
-        definition = row["description"]
-        q_emb = embed_vocab(query, definition).astype("float32").reshape(1, -1)
-
-        # Search in combined index
-        D_match, I_match = index_lib.search(q_emb, k=k_nearest)
-
-        # to get a 1D array
-        indices = I_match.flatten()
-        distances = D_match.flatten()
-
-        # Combine all into a flat list of dicts
-        combined = [
-            {
-                "query": query,
-                "definition": definition,
-                "id": int(idx),
-                **meta_data_dict[int(idx)],  # unpack nested keys
-                "Distance": float(dist)
-            }
-            for idx, dist in zip(indices, distances)
-            if idx in meta_data_dict
-        ]
-
-        df_comb = pd.DataFrame(combined)
-
-        # Sort prefLabel first, then Distance ascending
-        df_comb = df_comb.sort_values(
-            by=["QC_label", "Distance"],
-            ascending=[True, True],
-            key=lambda col: col.map({"prefLabel": 0, "altLabel": 1}) if col.name == "QC_label" else col
-        )
-
-        # Deduplicate URIs — keep prefLabel version if present
-        df_comb = df_comb.drop_duplicates(subset="uri", keep="first")
-
-        df_comb = df_comb.sort_values(
-            by="Distance",
-            ascending=True,
-        )
-
-        matches.extend(df_comb.to_dict(orient="records"))
-
-    # #  Final global sort on similarity
-    # if matches:
-    #     df_out = pd.DataFrame(matches).sort_values(by="Similarity", ascending=True)
-
-    return matches
-
-
 def add_visual_row_group(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add a 'Group' emoji/marker column based on changes in the 'query' column.
@@ -557,6 +421,176 @@ def make_clickable_links(uris):
     # Convert list of URIs into HTML links separated by commas
     return ", ".join(f'<a href="{u}" target="_blank">{u}</a>' for u in uris)
 
+def get_record_id_from_Zenodo_url(url:str):
+    # Extract the record ID from a Zenodo URL
+    match_record = re.search(r"zenodo.org/records/(\d+)", url)
+    if match_record:
+        return match_record.group(1)
+    
+    matc_doi = re.search(r"10.5281/zenodo.(\d+)", url)
+    if matc_doi:
+        return matc_doi.group(1)
+    
+    raise ValueError(f"Could not extract Zenodo record ID for '{url}'. Please ensure it's a valid Zenodo record URL or DOI.")
+
+def get_metadata_from_Zenodo_id(record_id:int) -> dict:
+    """Given a Zenodo record ID, fetch the record metadata and return it as a dictionary."""
+    request_url = f"https://zenodo.org/api/records/{record_id}"
+    headers = {
+            'Content-Type': 'application/json'
+            }
+    try:
+        response = requests.get(request_url, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
+
+        if 'metadata' not in response_json:
+            st.error("No metadata found in the Zenodo record.")
+            raise ValueError("No metadata in record")
+    except Exception as e:
+        st.error(f"Failed to fetch or read metadata from URL: {url_input}")
+    
+    return response_json["metadata"]
+
+def get_files_URL_from_Zenodo_id(record_id:int,extensions: Optional[Sequence[str]] = None) -> list[str]:
+    """Given a Zenodo record ID, fetch the record metadata and return a list of file URLs with specified extensions."""
+
+    request_url = f"https://zenodo.org/api/records/{record_id}"
+    headers = {
+            'Content-Type': 'application/json'
+            }
+    try:
+        response = requests.get(request_url, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
+
+        if 'files' not in response_json or len(response_json['files']) == 0:
+            st.error("No files found in the Zenodo record.")
+            raise ValueError("No files in record")
+    except Exception as e:
+        st.error(f"Failed to fetch or read tabular data from URL: {url_input}")
+    
+
+    files = response_json["files"]
+
+    if extensions:
+        exts = tuple(
+            (e if e.startswith(".") else f".{e}").lower()
+            for e in extensions
+        )
+        filtered_files = [f for f in files if f["key"].lower().endswith(exts)]
+    else:
+        filtered_files = list(files)  # no filtering
+
+    return [f["links"]["self"] for f in filtered_files]
+
+
+def get_excel(excel_file):
+    xls = pd.ExcelFile(excel_file)
+    sheets = xls.sheet_names
+    data_export=dict()
+    for sheet in sheets:
+
+        uploaded_df = pd.read_excel(xls, sheet_name=sheet, header=None)
+        # Try to detect header row
+        # Convert to list of lists and find row with many non-empty values
+        arr = uploaded_df.fillna('').astype(str)
+        header_row_idx = 0
+        for r in range(min(10, len(arr))):
+            row = arr.iloc[r]
+            non_empty = (row.str.strip() != '').sum()
+            if non_empty >= (len(row) / 2) and non_empty > 0:
+                header_row_idx = r
+                break
+        assert len(arr) > 0, f"Sheet is empty: '{sheet}' - file: '{excel_file.name}'"
+
+
+        # rebuild dataframe with detected header
+        df_values = pd.read_excel(excel_file, sheet_name=sheet, header=None)
+        headers = df_values.iloc[header_row_idx].fillna('').astype(str).apply(lambda x: x.strip() or f'col_{pd.util.hash_pandas_object(pd.Series([x])).iloc[0]}')
+        data = df_values.iloc[header_row_idx + 1 :].reset_index(drop=True)
+        data.columns = headers
+        data_export[sheet] = data
+    return data_export
+
+
+def description_to_plain_text(raw: str) -> str:
+    if not raw:
+        return ""
+
+    # 1) Unescape HTML entities (&lt;h2&gt; → <h2>)
+    unescaped = html.unescape(raw)
+
+    # 2) Parse HTML
+    soup = BeautifulSoup(unescaped, "html.parser")
+
+    # Remove non-content tags
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    # 3) Extract readable text
+    text = soup.get_text(separator="\n", strip=True)
+
+    # 4) Normalize whitespace
+    text = re.sub(r"\n{3,}", "\n\n", text)  # collapse excessive newlines
+    text = re.sub(r"[ \t]+", " ", text)
+
+    return text.strip()
+
+
+def is_safe_member(member_name: str) -> bool:
+    # Prevent zip-slip and weird absolute paths
+    normalized = member_name.replace("\\", "/")
+    if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
+        return False
+    return True
+
+def iter_interesting_zip_members(zf: zipfile.ZipFile, exts: list[str]):
+    for info in zf.infolist():
+        # skip directories
+        if info.is_dir():
+            continue
+        if not is_safe_member(info.filename):
+            continue
+        _, ext = os.path.splitext(info.filename)
+        ext = ext.lower()
+        if ext in exts:
+            yield info
+            
+@st.cache_resource
+def process_zip_from_url(file_url: str, tabular_dict: dict, context_files: list,
+                         tabular_exts:list[str], context_exts:list[str]):
+    r = requests.get(file_url)
+    r.raise_for_status()
+    filename = filename_from_url(file_url)
+
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        # 1) tabular members
+        for info in iter_interesting_zip_members(zf, tabular_exts):
+            member_basename = os.path.basename(info.filename)
+            with zf.open(info) as f:
+                raw = f.read()
+
+            # Reuse your existing readers:
+            if member_basename.lower().endswith(".csv"):
+                df = read_csvBytes_with_sniffer(raw)
+                tabular_dict[f"{member_basename} (from {filename})"] = df
+            elif member_basename.lower().endswith((".xlsx", ".xls")):
+                bio = io.BytesIO(raw)
+                bio.name = member_basename
+                df_dict = get_excel(bio)
+                for sheet_name, df in df_dict.items():
+                    tabular_dict[f"{member_basename} | {sheet_name} (from {filename})"] = df
+
+        # 2) context members (optional): stash bytes so you can later run PDF/DOCX extraction
+        for info in iter_interesting_zip_members(zf, context_exts):
+            with zf.open(info) as f:
+                raw = f.read()
+            context_files.append({
+                "source_zip": filename_from_url(file_url),
+                "member_path": info.filename,
+                "bytes": raw,
+            })
 
 # -------------------- UI --------------------
 st.title("📖 STEP 1 : input of information")
@@ -568,7 +602,7 @@ st.markdown("""
 
 st.markdown(""" --- """)
 
-mode = st.radio("Input mode", options=["single", "linked", "excel", "url - zenodo"], index=0, horizontal=True)
+mode = st.radio("Input mode", options=["single CSV", "linked", "excel", "url - zenodo"], index=0, horizontal=True)
 
 
 ## Different methods to convey the information
@@ -591,14 +625,18 @@ obs_df = None
 # File upload UI
 col1, col2 = st.columns([1, 1])
 
+tabular_dict = dict()
+zipped_context_files = []
 with col1:
     st.markdown("**Import tabular data**")
-    if mode == 'single':
+    if mode == 'single CSV':
         uploaded = st.file_uploader("Upload CSV file", type=['csv'], key='single_upload')
         filename = uploaded.name if uploaded else None
         if uploaded:
             try:
-                uploaded_df = read_csv_with_sniffer(uploaded)
+                raw = uploaded.getvalue()
+                uploaded_df = read_csvBytes_with_sniffer(raw)
+                tabular_dict[filename] = uploaded_df
             except Exception as e:
                 st.error(f"Failed to read CSV: {e}")
 
@@ -608,12 +646,14 @@ with col1:
         filename = obs_file.name if obs_file else None
         if site_file:
             try:
-                site_df = read_csv_with_sniffer(site_file)
+                raw = site_file.getvalue()
+                site_df = read_csvBytes_with_sniffer(raw)
             except Exception as e:
                 st.error(f"Failed to read sites CSV: {e}")
         if obs_file:
             try:
-                obs_df = read_csv_with_sniffer(obs_file)
+                raw = obs_file.getvalue()
+                obs_df = read_csvBytes_with_sniffer(raw)
             except Exception as e:
                 st.error(f"Failed to read observations CSV: {e}")
 
@@ -623,50 +663,88 @@ with col1:
         selected_sheet = None
         if excel_file:
             try:
-                xls = pd.ExcelFile(excel_file)
-                sheets = xls.sheet_names
-                selected_sheet = st.selectbox("Select sheet", options=sheets)
-                if selected_sheet:
-                    uploaded_df = pd.read_excel(xls, sheet_name=selected_sheet, header=None)
-                    # Try to detect header row
-                    # Convert to list of lists and find row with many non-empty values
-                    arr = uploaded_df.fillna('').astype(str)
-                    header_row_idx = 0
-                    for r in range(min(10, len(arr))):
-                        row = arr.iloc[r]
-                        non_empty = (row.str.strip() != '').sum()
-                        if non_empty >= (len(row) / 2) and non_empty > 0:
-                            header_row_idx = r
-                            break
-                    # rebuild dataframe with detected header
-                    df_values = pd.read_excel(excel_file, sheet_name=selected_sheet, header=None)
-                    headers = df_values.iloc[header_row_idx].fillna('').astype(str).apply(lambda x: x.strip() or f'col_{pd.util.hash_pandas_object(pd.Series([x])).iloc[0]}')
-                    data = df_values.iloc[header_row_idx + 1 :].reset_index(drop=True)
-                    data.columns = headers
-                    uploaded_df = data
+                df_dict = get_excel(excel_file)
+                for sheet_name, df in df_dict.items():
+                    tabular_dict[f"{filename} | {sheet_name}"] = df
             except Exception as e:
                 st.error(f"Failed to read Excel: {e}")
     elif mode == 'url - zenodo':
-        url_input = st.text_input("Enter URL to zenodo records. (format 'https://zenodo.org/api/records/{}')", key='url_input')
+        url_input = st.text_input("Enter URL to zenodo records. (prefered format 'https://zenodo.org/records/{ID_number}')", key='url_input',value="https://zenodo.org/records/8083652")
         
-        if not url_input.startswith("https://zenodo.org/api/records/"):
-            st.warning("URL must start with 'https://zenodo.org/api/records/'")
-            url_input = None
-
         if url_input:
-            try:
-                response = requests.get(url_input)
-                response.raise_for_status()
-                uploaded_df = read_csv_with_sniffer(io.BytesIO(response.content))
-            except Exception as e:
-                st.error(f"Failed to fetch or read CSV from URL: {e}")
+            # PIN : Zenodo Test URLS
+            # https://zenodo.org/records/14034500 -> empty excel
+            # https://zenodo.org/records/14726493 -> csv
+            # https://zenodo.org/records/8083652 -> dubble excel
+            # https://zenodo.org/records/10028494 -> complex zip
+            # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
+            #######################################################
+            record_id = get_record_id_from_Zenodo_url(url_input)
+
+            # retrieve tabular datafiles based on record_id
+            filtered_extensions_tabular=['.csv','.xlsx','.xls']
+            files_url_tabular = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_tabular)
+
+            # retrieve tabular datafiles based on record_id
+            filtered_extensions_zip=['.zip']
+            files_url_zip = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_zip)
+
+            # retrieve context files based on record_id  
+            filtered_extensions_context=['.doc','.docx','.pdf','.md']
+            files_url_context = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_context)
+            st.session_state['zenodo_context_files_url'] = files_url_context
+
+            # retrieve metadata and save in session state for later use in context
+            metadata_context_full = get_metadata_from_Zenodo_id(record_id)
+            metadata_context = {k: metadata_context_full[k] for k in {"title","description"} if k in metadata_context_full}
+            if "description" in metadata_context:
+                metadata_context["description"] = description_to_plain_text(metadata_context["description"])
+            st.session_state['zenodo_context_metadata'] = metadata_context
+
+            for file_url in files_url_tabular:
+
+                try:
+                    file_response_head = requests.head(file_url)
+                    file_response_head.raise_for_status()
+                except Exception as e:
+                    st.error(f"Failed to read file {file_url} from Zenodo record: {e}")
+                name_file = filename_from_url(file_url)                
+                ext_file = os.path.splitext(name_file)[1].lower()
+
+
+                file_response = requests.get(file_url)
+                if ext_file in ['.xlsx','.xls']:
+                    bitesIO = io.BytesIO(file_response.content)
+                    bitesIO.name = name_file
+                    df_dict = get_excel(bitesIO)
+                    for sheet_name, df in df_dict.items():
+                        tabular_dict[f"{name_file} | {sheet_name}"] = df
+                elif ext_file == '.csv':
+                    uploaded_df = read_csvBytes_with_sniffer(file_response.content)
+                    tabular_dict[name_file] = uploaded_df
+            for file_url in files_url_zip:
+                st.write(file_url)
+                process_zip_from_url(file_url,
+                                        tabular_dict,
+                                        zipped_context_files,
+                                        tabular_exts=filtered_extensions_tabular,
+                                        context_exts=filtered_extensions_context)
+    st.session_state["zenodo_context_files_from_zip"] = zipped_context_files
+
+    st.write(tabular_dict)
+
+    if  mode != 'url - zenodo':
+        st.session_state.pop("zenodo_context_files_url", None)
+        st.session_state.pop("zenodo_context_metadata", None)
+
+
 
 with col2:
     st.markdown("**Import existing metadata**")
     myinfo = st.empty()
     metadata_file = st.file_uploader("Upload metadata (CSV or JSON TableSchema/CSVW)", type=['csv', 'json'], key='meta_upload')
     if 'metadata_df' not in st.session_state or metadata_file is None:
-            myinfo.info("The metadata file is optional but should be a tabular data file with at least a **'name'** column that matches the headers of the uploaded data file. Optionally, it can include columns such as **'datatype', 'element', 'unit', 'method', and 'description'** for additional annotations.")
+            myinfo.info("The metadata file is optional but should be a tabular data file with at least a **'name'** column that matches the headers of the uploaded data file. Optionally, it can include columns such as **'datatype'**, **'element'**, **'unit'**, **'method'**, and **'description'** for additional annotations.")
 
 # Handle linked mode linking columns
 if mode == 'linked' and site_df is not None and obs_df is not None:
@@ -681,10 +759,12 @@ if mode == 'linked' and site_df is not None and obs_df is not None:
             merged = obs_df.merge(site_df, left_on=obs_fk_col, right_on=site_id_col, how='left', suffixes=('_obs', '_site'))
             st.dataframe(merged.head(5))
             uploaded_df = merged  # use merged for building metadata
+            tabular_dict[filename] = uploaded_df
         except Exception as e:
             st.error(f"Failed to merge tables: {e}")
 
 with col2:
+    #TODO: change to dict !!!!
     # If metadata import provided, parse it
     imported_metadata_df = None
     if metadata_file is not None:
@@ -692,347 +772,89 @@ with col2:
         if imported_metadata_df is not None:
             st.success("Imported metadata file parsed.")
 
-# If a dataframe is present (uploaded or merged), show preview and build metadata
-if uploaded_df is not None:
 
-    st.markdown("### Data preview (first 5 rows)")
-    st.dataframe(uploaded_df.head(5))
-    if 'metadata_df' not in st.session_state or st.session_state.get('source_df_id') != id(uploaded_df):
-        meta_df = build_metadata_df_from_df(uploaded_df)
-        st.session_state['metadata_df'] = meta_df
-        st.session_state['source_df_id'] = id(uploaded_df)
+# If a dataframe is present (uploaded or merged), show preview and build metadata
+if tabular_dict:
+
+    st.markdown(""" --- """)
+    st.markdown(f"### Data preview")
+    st.caption("HINT: SHIFT+scroll to navigate the tabs horizontally if needed.")
+    st.markdown("""
+            <style>
+                .stTabs [data-baseweb="tab-list"] {
+                    gap: 2px;
+                }
+
+                .stTabs [data-baseweb="tab"] {
+                    height: 50px;
+                    background-color: #F0F2F6;
+                    border-radius: 4px 4px 0px 0px;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                }
+
+                .stTabs [aria-selected="true"] {
+                    background-color: #FFFBF1;
+                }
+
+            </style>""", unsafe_allow_html=True)
+    # Create one tab per key
+    tab_labels = list(tabular_dict.keys())
+    tabs = st.tabs(tab_labels)
+    error_handling_tabs = st.empty()
+    error_tabs = []
+    error_tabs_explain = []
+
+    for tab, key in zip(tabs, tab_labels):
+        df = tabular_dict[key]
+
+        with tab:
+            # TODO/ further error handling: check if df is really a dataframe, if it has columns, duplicates columns, etc.
+            try:
+                st.dataframe(df.head(5))
+            except Exception as e:
+                error_tabs.append(key)
+                error_tabs_explain.append(e)
+
+                error_handling_tabs.error(
+                            "🙄 couldn't load the data properly for  the following tab(s):\n\n"
+                            + "\n".join(f"- {k}:  \n {e}" for k,e in zip(error_tabs,error_tabs_explain))
+                            + "\n\n"
+                            + "Handled this gracefully by completly ignoring these tabs. These will not be taken into account in further processing"
+                    )
+                st.error(f"Error displaying dataframe: {e}")
+                continue
+
+            # # Unique ID per dataframe
+            # source_id = id(df)
+            # meta_key = f"metadata_df_{key}"
+            # source_id_key = f"source_df_id_{key}"
+            #TODO: Check if needed to have a key for each dataframe. Can't we just use the dicts?
+            source_id = id(df)
+            meta_key = f"metadata_df"
+            source_id_key = f"source_df_id"
+            if meta_key not in st.session_state:
+                st.session_state[meta_key] = {}
+
+        
+            if (meta_key not in st.session_state or st.session_state.get(source_id_key) != source_id):
+                st.session_state[meta_key][key] = build_metadata_df_from_df(df)
+                st.session_state[source_id_key] = source_id
+
+            st.markdown("#### Metadata")
+            st.dataframe(st.session_state[meta_key][key])
+
 
     # allow user to import metadata and apply to current
-    if imported_metadata_df is not None or st.session_state.get('metadata_df_id') != id(imported_metadata_df):
-        #if st.button("Apply imported metadata to current columns"):
-        st.session_state['metadata_df'] = apply_new_metadata_info(imported_metadata_df, st.session_state['metadata_df'],overwrite='yes')
-        st.session_state['metadata_df_id'] = id(imported_metadata_df)
+    #TODO: if import is changed to dict with keys matching the dataframes, change this part as well!!!!!!!!
+    # if imported_metadata_df is not None or st.session_state.get('metadata_df_id') != id(imported_metadata_df):
+    #     #if st.button("Apply imported metadata to current columns"):
+    #     st.session_state['metadata_df'] = apply_new_metadata_info(imported_metadata_df, st.session_state['metadata_df'],overwrite='yes')
+    #     st.session_state['metadata_df_id'] = id(imported_metadata_df)
+        # st.info("""Metadata has been generated based on the uploaded dataset. \n \n ⏭️ You're ready for the next step""", icon="✅")
+    st.info("""Metadata has been generated based on the uploaded dataset. You can still upload previous work on metadata and apply it to the generated metadata. \n \n ⏭️ You're ready for the next step on the following page""", icon="✅")
 
-    st.divider()
-
-    st.markdown("### Preview Description")
-    st.caption("Please, feel free to edit the descriptions directly in the table below or use some AI-power to help you.")
-
-    expander_status = st.session_state.get("my_expander_is_expanded", False)
-
-    col1_desc, col2_desc = st.columns([3, 2])
-    
-    with col1_desc:
-        meta_df_description = st.session_state.get('metadata_df')
-        edited_description = st.data_editor(meta_df_description[['name','description']],
-                                            num_rows="dynamic",
-                                            disabled='name',
-                                            #height ='stretch',
-                                            )
-    
-
-    with col2_desc:
-        with st.expander("Need some LLM help?", expanded=False):
-
-
-            container_3 = st.empty()
-            button_A_3 = container_3.button('ℹ️  ')
-            if button_A_3:
-                container_3.empty()
-                button_B_3 = container_3.button("ℹ️ Attention: Your header names and context text will be securely sent to an external source to auto generate descriptions. Please avoid including sensitive or personal information in the context files or variable names.")
-            
-            st.markdown("**add some context files to start generation of descriptions with the help of an LLM**")
-            uploaded_contextfiles = st.file_uploader("Upload context files", type=['pdf','doc','docx'], key='context_upload', accept_multiple_files=True)
-            # Option to create a custom context file
-            st.markdown("**Or create your own context file below:**")
-            custom_context = st.text_area(
-                "Write your custom context here:",
-                placeholder="Type your context here...",
-                height=200,
-                key="custom_context_input"
-            )
-
-
-    # Add a key to store the variable descriptions in session state
-    if "variable_descriptions" not in st.session_state:
-        st.session_state["variable_descriptions"] = None
-
-    if uploaded_contextfiles or custom_context.strip():
-        all_context_text = ""
-        with st.expander("Loaded context", expanded=True):
-            with st.spinner("🧠 Reading your lovely context files..."):
-                st.subheader("Extracted Context")
-                st.caption("Please, feel free to redact any unimportant information from the context.")
-                if uploaded_contextfiles:
-                    for i, contextfile in enumerate(uploaded_contextfiles):
-                        context_text=""
-                        context_text = read_context_file(contextfile)
-                        # Use a unique key for each text area to store its state
-                        key = f"context_text_{i}"
-                        context_text = st.session_state.get(key, context_text)  # Load existing state or default
-                        updated_text = st.text_area(
-                            f"Context: {contextfile.name} [characters: {len(context_text)}]",
-                            value=context_text,
-                            height=300,
-                            key=key
-                        )
-                        all_context_text += updated_text + "\n"
-                                # Add custom context to the combined text
-                    
-                if custom_context.strip():
-                    key = f"context_text_freefield"
-                    updated_text = st.text_area(
-                        f"Free text: [characters: {len(custom_context)}]",
-                        value=custom_context,
-                        height=300,
-                        key=key
-                    )
-                    all_context_text += updated_text.strip() + "\n"
-                    # Combine all updated text areas into one variable
-
-                st.session_state["all_context_text"] = all_context_text
-
-            AI_descriptions = None
-            LLM_generator = st.button("AI generate Descriptions", key="generate_descriptions_button")
-            if LLM_generator:
-                meta_df_description = st.session_state.get('metadata_df')
-                variable_names = list(meta_df_description['name'])
-
-                AI_descriptions = generate_descriptions_with_LLM(var_list = variable_names,
-                                                                context=all_context_text,
-                                                                human_description=meta_df_description['description'])
-                description_df = pd.DataFrame(
-                    list(AI_descriptions.items()), columns=["name", "description"]
-                )
-
-                st.session_state["AI_var_descriptions"] = description_df
-
-            if "AI_var_descriptions" in st.session_state:
-                AI_var_df = st.session_state.get('AI_var_descriptions')
-                st.subheader("Structured Variable Descriptions")
-                st.caption("Please, feel free to edit the generated descriptions before approving them. By deleting the content of a description, the original description will be kept.")
-                edited_AI_Var = st.data_editor(AI_var_df, width='stretch',disabled='name',key="preview_desc_editor")
-                if not edited_AI_Var.equals(AI_var_df):
-                    st.session_state["AI_var_descriptions"] = edited_AI_Var
-                    st.rerun() # Not uptimal, but necessary to update the edited df in session_state. Bug is know in streamlit community
-                approve_AI = st.button("✅ Approve and overwrite description with generated content", key="copy_AI_descriptions_button")
-                if approve_AI:
-                    # overwrite descriptions in main metadata df
-                    meta_df = st.session_state.get('metadata_df')
-                    meta_df_added = apply_new_metadata_info(edited_AI_Var, meta_df,overwrite = 'yes')
-                    st.session_state['metadata_df'] = meta_df_added
-                    st.info("✅ Descriptions updated in main metadata table.")
-
-    st.divider()
-
-    st.markdown("### Element matcher")
-
-    modelname = "models_local/all-MiniLM-L6-v2"
-    model = load_sentence_model(modelname = modelname)
-
-
-    index_vocabs, dict_vocabs = load_vocab_indexes(modelname = modelname)
-    vocab_list = [v["label"] for v in dict_vocabs.values() if "label" in v]
-
-    # Add a key to store the vocabulary matching results in session state
-    if "vocab_matching_results" not in st.session_state:
-        st.session_state["vocab_matching_results"] = None
-
-
-    if st.button("Find Vocabulary Terms In Thesaury"):
-        meta_df = st.session_state.get('metadata_df')
-
-        with st.spinner("🔎 Finding nearest vocabulary terms..."):
-            result_df = find_nearest_vocab(
-                meta_df,                         # dataframe with searchterm. necesarry columns; ["Variable", "Description"]
-                index_lib=index_vocabs,          # FAISS index
-                meta_data_dict=dict_vocabs,      # mapping dict
-                k_nearest=4
-            )
-
-        st.session_state["vocab_matching_results"] = result_df
-        st.success("✅ Matching complete!")
-
-
-    if st.session_state["vocab_matching_results"] is not None:
-        result_df = pd.DataFrame(st.session_state["vocab_matching_results"])
-        # Add a checkbox column if it doesn't exist
-        if "Selected" not in result_df.columns:
-            result_df.insert(1, "Selected", False) 
-            # Set "Selected" to True for the row with the lowest Distance in each group of "query"
-            idx_min_distance = result_df.groupby("query")["Distance"].idxmin()
-            result_df.loc[idx_min_distance, "Selected"] = True
-
-        styled_df = add_visual_row_group(result_df)
-
-        column_list = styled_df.columns.tolist()
-        disabling_columns= column_list.copy()
-        disabling_columns.remove("Selected")
-        priority_cols = [" ", "Selected", "query", "label", "definition"]
-        new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
-
-
-        edited_df = st.data_editor(
-            styled_df,
-            disabled =disabling_columns,
-            column_order = new_order,
-            num_rows="dynamic",
-            width='stretch',
-            key="editable_vocab_df_v2",
-            hide_index=True
-        )
-
-        # Process the selected rows
-        selected_rows = edited_df[edited_df["Selected"]].copy()
-
-        # Drop duplicates while preserving original order of 'query'
-        unique_queries = edited_df["query"].drop_duplicates()
-
-        if not selected_rows.empty:
-            st.markdown("#### -> Selected Rows")
-            
-            summary_df = (
-                selected_rows
-                .groupby("query", sort=False, as_index=False)
-                .agg({
-                    "label": lambda x: list(set(x)),  # use set() to keep unique labels
-                    "uri": lambda x: list(set(x))     # use set() to keep unique URIs
-                })
-            )
-
-            orig_queries = list(unique_queries)
-            missing = [q for q in orig_queries if q not in summary_df["query"].values]
-            if missing:
-                df_missing = pd.DataFrame({
-                    "query": missing,
-                    "label": [ [] for _ in missing ],
-                    "uri":   [ [] for _ in missing ]
-                })
-                summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
-
-            summary_df["element_uri"] = summary_df.apply(
-                lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
-                axis=1
-            )
-            # Reorder rows according to the original query order
-            summary_df["query"] = pd.Categorical(summary_df["query"], categories=unique_queries, ordered=True)
-            summary_df = summary_df.sort_values("query").reset_index(drop=True)
-            summary_df["label"] = summary_df["label"].apply(lambda x: ", ".join(x))
-            summary_df["uri"] = summary_df["uri"].apply(lambda x: " || ".join(x))
-            st.dataframe(summary_df,
-                             column_config={
-                                "uri": st.column_config.LinkColumn()
-                            })
-            
-            summary_df = summary_df.rename(columns={"query": "name","label":"element"})
-
-            st.session_state['metadata_df'] = apply_new_metadata_info(summary_df, st.session_state['metadata_df'], overwrite='yes_incl_blanks')
-
-        else:
-            st.info("No rows selected.")
-
-    st.divider()
-
-    st.markdown("### Column metadata")
-    meta_df = st.session_state.get('metadata_df')
-
-    # show suggestions helper
-    st.write("Tip: click a cell to finetune the metadata.")
-
-    edited = st.data_editor(meta_df, num_rows="dynamic")
-
-    # validate datatype column to be allowed values
-    if 'datatype' in edited.columns:
-        edited['datatype'] = edited['datatype'].apply(lambda x: x if x in DATA_TYPE_OPTIONS else 'string')
-
-    # Save edited meta back to session state
-    st.session_state['metadata_df'] = edited
-
-    # download buttons
-    st.markdown("### Export metadata")
-    # CSV
-    csv_buf = io.StringIO()
-    out_df = st.session_state['metadata_df'].copy()
-    out_df.to_csv(csv_buf, index=False)
-    csv_bytes = csv_buf.getvalue().encode('utf-8')
-    download_bytes(csv_bytes, 'metadata.csv', 'text/csv')
-
-    # TableSchema
-    if st.button("Generate TableSchema JSON"):
-        schema = {"fields": [], "primaryKey": None}
-        for _, r in st.session_state['metadata_df'].iterrows():
-            f = {"name": r['name']}
-            if r.get('datatype'):
-                f['type'] = r['datatype']
-            if r.get('description'):
-                f['description'] = r['description']
-            if r.get('unit'):
-                f['unit'] = r['unit']
-            if r.get('method'):
-                f['method'] = r['method']
-            if r.get('element'):
-                f['title'] = r['element']
-            schema['fields'].append(f)
-        st.json(schema, expanded=True)
-        download_bytes(json.dumps(schema, indent=2).encode('utf-8'), 'tableschema.json', 'application/json')
-
-    # CSVW
-    if st.button("Generate CSVW JSON"):
-        csvw = {
-            "@context": "http://www.w3.org/ns/csvw",
-            "url": filename,
-            "tableSchema": {"columns": []}
-        }
-        for _, r in st.session_state['metadata_df'].iterrows():
-            col = {"name": r['name']}
-            if r.get('element'):
-                col['titles'] = [r['element']]
-            if r.get('element_uri'):
-                col['propertyUrl'] = [element for _,element in ast.literal_eval(r['element_uri']).items()]
-            if r.get('unit'):
-                col['unit'] = r['unit']
-            if r.get('method'):
-                col['method'] = r['method']
-            if r.get('datatype'):
-                col['datatype'] = r['datatype']
-            if r.get('description'):
-                col['description'] = r['description']
-            csvw['tableSchema']['columns'].append(col)
-        st.json(csvw, expanded=True)
-        download_bytes(json.dumps(csvw, indent=2).encode('utf-8'), 'csvw.json', 'application/json')
-
-else:
-    st.info("No file loaded yet. Use the controls above to upload a CSV or Excel file.")
-
+    st.markdown("## DEBUG OUTPUT")
+    st.json(st.session_state[meta_key])
 # -------------------- reach us --------------------
-with st.sidebar:
-
-    st.markdown("""
-    ### 🌱 Let’s improve SoilWise together!
-
-    This tool is part of the Horizon Europe **SoilWise** project, and your input is essential for making it truly useful in real-world contexts.  
-    If you’d like to discuss the functionalities, share your experiences, or explore collaboration, we’d be glad to hear from you.
-
-    **💬 Reach out — your insights matter.**
-    """)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown(
-            """
-            <a href="mailto:max.vercruyssen@vlaanderen.be" target="_blank">
-                <button style="padding:10px 18px; border-radius:8px; height: 5rem; background-color:#58a9f8; color:white; border:none; cursor:pointer;">
-                    Email me
-                </button>
-            </a>
-            """,
-            unsafe_allow_html=True
-        )
-
-    with col2:
-        st.markdown(
-            """
-            <a href="https://outlook.office.com/bookwithme/user/ab3771ccfeed4c5c83ca7a43d657865d@vlaanderen.be?" target="_blank">
-                <button style="padding:10px 18px; border-radius:8px;height: 5rem;  background-color:#50c082; color:white; border:none; cursor:pointer;">
-                    Book a meeting
-                </button>
-            </a>
-            """,
-            unsafe_allow_html=True
-        )
+add_Soilwise_contact_sidebar()
