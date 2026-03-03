@@ -1,29 +1,7 @@
 import streamlit as st
-import pandas as pd
-import io
-import json
-from datetime import datetime
-from typing import List, Dict
-import os
-from PyPDF2 import PdfReader
-import docx
-import hashlib
-from openai import OpenAI
-import re
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from sklearn.preprocessing import normalize
-from tqdm import tqdm
-import requests
-import ast
-import csv
+from ui.blocks import add_Soilwise_logo
 
-
-st.logo(
-    'Logo/SWlogocolor.svg',
-    link="https://soilwise-he.eu/",
-)
+add_Soilwise_logo()
 
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
@@ -88,11 +66,12 @@ st.markdown("""
 
 FAIR data is not just a technical requirement — it is a **collective investment** in better science, transparency, and long‑term reuse.
 
-Thank you for contributing your time, expertise, and data.  
+Thank you for contributing your time, expertise, and publishing your data FAIR.  
 Let’s make soil data more reusable — **step by step**.
 """)
 
-st.success("👉 Get started by uploading your dataset or selecting an annotation workflow.")
+st.markdown("""---""")
+st.success("👉 Get started by going to the next page (in the sidebar) and uploading your dataset or selecting an annotation workflow.")
 
 
 
