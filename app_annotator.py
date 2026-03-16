@@ -505,7 +505,7 @@ def find_nearest_vocab(df_descriptions, index_lib, meta_data_dict, k_nearest=4):
         # Combine all into a flat list of dicts
         combined = [
             {
-                "query": query,
+                "header": query,
                 "definition": definition,
                 "id": int(idx),
                 **meta_data_dict[int(idx)],  # unpack nested keys
@@ -546,7 +546,7 @@ def add_visual_row_group(df: pd.DataFrame) -> pd.DataFrame:
     Add a 'Group' emoji/marker column based on changes in the 'query' column.
     Works safely in st.data_editor (no styling applied).
     """
-    query_change = df["query"].ne(df["query"].shift()).cumsum()
+    query_change = df["header"].ne(df["header"].shift()).cumsum()
     df = df.copy()
     df["Group Marker"] = query_change.map(lambda x: "🔶" if x % 2 == 0 else "🔷") # other emoji options: ⬛⬜
     # Optionally move marker column to the front
@@ -947,9 +947,10 @@ if uploaded_df is not None:
                 meta_data_dict=dict_vocabs,      # mapping dict
                 k_nearest=4
             )
-
+        
         st.session_state["vocab_matching_results"] = result_df
         st.success("✅ Matching complete!")
+
 
 
     if st.session_state["vocab_matching_results"] is not None:
@@ -958,17 +959,34 @@ if uploaded_df is not None:
         if "Selected" not in result_df.columns:
             result_df.insert(1, "Selected", False) 
             # Set "Selected" to True for the row with the lowest Distance in each group of "query"
-            idx_min_distance = result_df.groupby("query")["Distance"].idxmin()
+            idx_min_distance = result_df.groupby("header")["Distance"].idxmin()
             result_df.loc[idx_min_distance, "Selected"] = True
 
         styled_df = add_visual_row_group(result_df)
 
+
+
+
+
+        styled_df = styled_df.merge(
+            st.session_state.get("metadata_df")[["name", "description"]],
+            left_on="header",
+            right_on="name",
+            how="left",
+        ).drop(columns=['name'])
+
         column_list = styled_df.columns.tolist()
         disabling_columns= column_list.copy()
         disabling_columns.remove("Selected")
-        priority_cols = [" ", "Selected", "query", "label", "definition"]
-        new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
 
+
+        mapping_headers = {"query": "header","label":"vocab","description": "header description"}  
+        column_list = [mapping_headers.get(ele, ele) for ele in column_list]
+        disabling_columns = [mapping_headers.get(ele, ele) for ele in disabling_columns] 
+        styled_df = styled_df.rename(columns=mapping_headers)
+
+        priority_cols = [" ", "Selected", "header", "vocab", "definition","header description"]
+        new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
 
         edited_df = st.data_editor(
             styled_df,
@@ -984,45 +1002,45 @@ if uploaded_df is not None:
         selected_rows = edited_df[edited_df["Selected"]].copy()
 
         # Drop duplicates while preserving original order of 'query'
-        unique_queries = edited_df["query"].drop_duplicates()
+        unique_queries = edited_df["header"].drop_duplicates()
 
         if not selected_rows.empty:
             st.markdown("#### -> Selected Rows")
             
             summary_df = (
                 selected_rows
-                .groupby("query", sort=False, as_index=False)
+                .groupby("header", sort=False, as_index=False)
                 .agg({
-                    "label": lambda x: list(set(x)),  # use set() to keep unique labels
+                    "vocab": lambda x: list(set(x)),  # use set() to keep unique labels
                     "uri": lambda x: list(set(x))     # use set() to keep unique URIs
                 })
             )
 
             orig_queries = list(unique_queries)
-            missing = [q for q in orig_queries if q not in summary_df["query"].values]
+            missing = [q for q in orig_queries if q not in summary_df["header"].values]
             if missing:
                 df_missing = pd.DataFrame({
-                    "query": missing,
-                    "label": [ [] for _ in missing ],
+                    "header": missing,
+                    "vocab": [ [] for _ in missing ],
                     "uri":   [ [] for _ in missing ]
                 })
                 summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
 
             summary_df["element_uri"] = summary_df.apply(
-                lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
+                lambda row: {label: uri for label, uri in zip(row["vocab"], row["uri"])},
                 axis=1
             )
             # Reorder rows according to the original query order
-            summary_df["query"] = pd.Categorical(summary_df["query"], categories=unique_queries, ordered=True)
-            summary_df = summary_df.sort_values("query").reset_index(drop=True)
-            summary_df["label"] = summary_df["label"].apply(lambda x: ", ".join(x))
+            summary_df["header"] = pd.Categorical(summary_df["header"], categories=unique_queries, ordered=True)
+            summary_df = summary_df.sort_values("header").reset_index(drop=True)
+            summary_df["vocab"] = summary_df["vocab"].apply(lambda x: ", ".join(x))
             summary_df["uri"] = summary_df["uri"].apply(lambda x: " || ".join(x))
             st.dataframe(summary_df,
                              column_config={
                                 "uri": st.column_config.LinkColumn()
                             })
             
-            summary_df = summary_df.rename(columns={"query": "name","label":"element"})
+            summary_df = summary_df.rename(columns={"header": "name","vocab":"element"})
 
             st.session_state['metadata_df'] = apply_new_metadata_info(summary_df, st.session_state['metadata_df'], overwrite='yes_incl_blanks')
 
@@ -1043,8 +1061,10 @@ if uploaded_df is not None:
     if 'datatype' in edited.columns:
         edited['datatype'] = edited['datatype'].apply(lambda x: x if x in DATA_TYPE_OPTIONS else 'string')
 
-    # Save edited meta back to session state
-    st.session_state['metadata_df'] = edited
+    if not edited.equals(meta_df):
+        st.session_state["metadata_df"] = edited
+        st.rerun() # Not uptimal, but necessary to update the edited df in session_state. Bug is know in streamlit community
+
 
     # download buttons
     st.markdown("### Export metadata")
