@@ -5,13 +5,20 @@ description = "Streamlit tool for annotation of datasets"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "benepar>=0.2.0",
     "bs4>=0.0.2",
     "chardet>=5.2.0",
     "faiss-cpu>=1.12.0",
+    "matplotlib>=3.10.8",
     "openai>=2.7.2",
     "openpyxl>=3.1.5",
+    "pip>=26.0.1",
     "pypdf2>=3.0.1",
     "python-docx>=1.2.0",
+    "pyvis>=0.3.2",
+    "rdflib>=7.6.0",
+    "requests>=2.32.5",
     "sentence-transformers>=5.1.2",
+    "spacy>=3.8.11",
     "streamlit>=1.51.0",
 ]
