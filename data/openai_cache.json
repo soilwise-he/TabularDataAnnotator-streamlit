@@ -1478,5 +1478,64 @@
     "version": 1,
     "timestamp": "2025-11-14T09:33:48.255466",
     "provider": "OpenAI"
+  },
+  "56507855a3c8491ac9ef6f2f285bd1d1b0cd9db3da3b13c83c242b223cfd8c4a": {
+    "context_excerpt": "investigation of genes\n",
+    "variables": [
+      "Gene ID (hint: )",
+      "Location (hint: )",
+      "Genome (hint: )",
+      "COG ID (hint: )",
+      "COG Type (hint: )",
+      "Gene Name (hint: )",
+      "KO ID (hint: )",
+      "KO Description (hint: )"
+    ],
+    "response": "```json\n{\n    \"Gene ID\": \"A unique identifier assigned to a specific gene within a genome, typically used for cataloging and reference purposes.\",\n    \"Location\": \"The specific chromosomal position of a gene within a genome, often described in terms of base pair coordinates.\",\n    \"Genome\": \"The complete set of genetic material, including all genes and non-coding sequences, present in an organism.\",\n    \"COG ID\": \"A unique identifier for a Cluster of Orthologous Groups, which categorizes genes based on evolutionary relationships.\",\n    \"COG Type\": \"A classification that indicates the functional category of a gene based on its COG ID, reflecting its evolutionary and functional characteristics.\",\n    \"Gene Name\": \"The standardized name assigned to a gene, often reflecting its function or the protein it encodes.\",\n    \"KO ID\": \"A unique identifier for a KEGG Orthology group, which classifies genes based on their roles in biological pathways.\",\n    \"KO Description\": \"A textual description that provides information about the function or role of the gene associated with a KO ID in biological processes.\"\n}\n```",
+    "version": 1,
+    "timestamp": "2026-03-16T09:18:13.107106",
+    "provider": "OpenAI"
+  },
+  "ef3692b3398c2c9f90cf186dacba54de7d74ee66f2730c90b03c023186621c10": {
+    "context_excerpt": "genomes\n",
+    "variables": [
+      "Gene ID (hint: )",
+      "Location (hint: )",
+      "Genome (hint: )",
+      "COG ID (hint: )",
+      "COG Type (hint: )",
+      "Gene Name (hint: )",
+      "KO ID (hint: )",
+      "KO Description (hint: )"
+    ],
+    "response": "```json\n{\n    \"Gene ID\": \"A unique identifier assigned to a specific gene within a genome, often used for tracking and referencing genes in databases.\",\n    \"Location\": \"The specific position of a gene on a chromosome or within a genome, typically represented by coordinates or a chromosomal region.\",\n    \"Genome\": \"The complete set of genetic material (DNA or RNA) present in an organism, including all of its genes and non-coding sequences.\",\n    \"COG ID\": \"A unique identifier for a Cluster of Orthologous Groups, which categorizes genes based on their evolutionary relationships and functional similarities.\",\n    \"COG Type\": \"A classification that indicates the functional category of a gene within the Cluster of Orthologous Groups, such as metabolism, cellular processes, or information storage.\",\n    \"Gene Name\": \"The standardized name assigned to a gene, which often reflects its function, structure, or the protein it encodes.\",\n    \"KO ID\": \"A unique identifier for a gene or protein in the KEGG Orthology database, which categorizes genes based on their functional roles in biological pathways.\",\n    \"KO Description\": \"A textual description that provides information about the function or role of a gene or protein as classified in the KEGG Orthology database.\"\n}\n```",
+    "version": 1,
+    "timestamp": "2026-03-16T12:06:11.071429",
+    "provider": "OpenAI"
+  },
+  "8bcbf1a762c3a31f4557e155e72b2a20c373d5f6387d5088b0b0dea32a5b0f41": {
+    "context_excerpt": "Supporting information to:\n[Dataset] Soil organic carbon and soil organic matter measurements across European habitats, including permafrost regions and global seagrass sediments\n\nOverview\n\nData structure\nThe dataset consists of 16 columns and 9503 rows. Further context is provided below. Cells without values show “NA”.\n\nData quality control\nData regarding total carbon (%dw), CaCO3 (%dw), SOC (%dw), SOM (%dw), and habitat were gathered from all datasets. In cases where total carbon was measured ",
+    "variables": [
+      "Dataset_name (hint: )",
+      "Country (hint: )",
+      "LOI_method (hint: )",
+      "ID (hint: )",
+      "Habitat (hint: )",
+      "Soil_category (hint: )",
+      "Depth_low (hint: )",
+      "LOI_perc (hint: )",
+      "TC_perc (hint: )",
+      "SOC_perc (hint: )",
+      "f_tc_or_soc (hint: )",
+      "f_soc (hint: )",
+      "f_som (hint: )",
+      "f_c_in_som (hint: )",
+      "f_oc (hint: )",
+      "Data_reference (hint: )"
+    ],
+    "response": "```json\n{\n    \"Dataset_name\": \"The name of the dataset from which the soil carbon and soil organic matter measurements were derived.\",\n    \"Country\": \"The country where the soil samples were collected for analysis.\",\n    \"LOI_method\": \"The methodology used to measure Loss-On-Ignition (LOI), which can vary based on temperature ranges, soil amounts, and combustion time.\",\n    \"ID\": \"A unique identifier assigned to each soil sample or measurement within the dataset.\",\n    \"Habitat\": \"The specific ecological environment or ecosystem type from which the soil sample was collected.\",\n    \"Soil_category\": \"The classification of the soil based on its physical and chemical properties, which may include types such as peat, mineral, or organic soils.\",\n    \"Depth_low\": \"The lower boundary of the soil depth increment from which the sample was taken, measured in centimeters or another unit.\",\n    \"LOI_perc\": \"The percentage of organic matter in the soil sample determined by the Loss-On-Ignition method.\",\n    \"TC_perc\": \"The percentage of total carbon present in the soil sample, measured as a dry weight percentage (%dw).\",\n    \"SOC_perc\": \"The percentage of soil organic carbon in the soil sample, calculated as a dry weight percentage (%dw).\",\n    \"f_tc_or_soc\": \"The fraction of total carbon or soil organic carbon relative to the total sample, used to assess carbon content.\",\n    \"f_soc\": \"The fraction of soil organic carbon in relation to the total carbon content of the soil sample.\",\n    \"f_som\": \"The fraction of soil organic matter in relation to the total mass of the soil sample.\",\n    \"f_c_in_som\": \"The fraction of carbon present within the soil organic matter, indicating the organic carbon component.\",\n    \"f_oc\": \"The fraction of organic carbon in relation to the total organic matter content of the soil sample.\",\n    \"Data_reference\": \"Citations or references associated with the dataset, providing sources for the data collected.\"\n}\n```",
+    "version": 1,
+    "timestamp": "2026-03-16T13:00:16.662216",
+    "provider": "OpenAI"
   }
 }
