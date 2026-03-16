@@ -468,6 +468,7 @@ def get_files_URL_from_Zenodo_id(record_id:int,extensions: Optional[Sequence[str
             st.error("No files found in the Zenodo record.")
             raise ValueError("No files in record")
     except Exception as e:
+        st.write(e)
         st.error(f"Failed to fetch or read tabular data from URL: {url_input}")
     
 
@@ -680,6 +681,8 @@ with col1:
             # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
             #######################################################
             record_id = get_record_id_from_Zenodo_url(url_input)
+            
+            
 
             # retrieve tabular datafiles based on record_id
             filtered_extensions_tabular=['.csv','.xlsx','.xls']
@@ -730,8 +733,6 @@ with col1:
                                         tabular_exts=filtered_extensions_tabular,
                                         context_exts=filtered_extensions_context)
     st.session_state["zenodo_context_files_from_zip"] = zipped_context_files
-
-    st.write(tabular_dict)
 
     if  mode != 'url - zenodo':
         st.session_state.pop("zenodo_context_files_url", None)
