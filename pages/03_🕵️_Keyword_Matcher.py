@@ -20,6 +20,8 @@ import ast
 import csv
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_cache_button
 
+from collections import defaultdict
+
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 add_Soilwise_logo()
@@ -427,6 +429,7 @@ def load_vocab_indexes(modelname="all-MiniLM-L6-v2"):
         #             "label": "...",
         #             "definition": "[...]",
         #             "QC_label": "prefLabel" or "altLabel"
+        #             "source":"..."
         #         },
         #         1: { ... },
         #         ...
@@ -502,9 +505,9 @@ def find_nearest_vocab(df_descriptions, _index_lib, meta_data_dict, k_nearest=4)
             {
                 "query": query,
                 "definition": definition,
-                "id": int(idx),
+                "id": f"{query}__{int(idx)}",
                 **meta_data_dict[int(idx)],  # unpack nested keys
-                "Distance": float(dist)
+                "Distance": float(dist),
             }
             for idx, dist in zip(indices, distances)
             if idx in meta_data_dict
@@ -553,6 +556,66 @@ def make_clickable_links(uris):
     return ", ".join(f'<a href="{u}" target="_blank">{u}</a>' for u in uris)
 
 
+def sources_selector_ncols(unique_sources, key_prefix="src", n=4):
+    """
+    Render sources as checkboxes in 3 columns with Select all / Deselect all buttons.
+    Returns: list[str] of selected sources.
+    """
+    unique_sources = list(unique_sources)  # ensure indexable
+    unique_sources_sorted = sorted(unique_sources)
+
+    # --- Buttons row
+    c1, c2, c3 = st.columns([1, 1, 3])
+    with c1:
+        select_all = st.button("Select all", use_container_width=True,icon="✅")
+    with c2:
+        deselect_all = st.button("Deselect all", use_container_width=True,icon="🟩")
+
+    # Apply button actions by updating session_state for all checkbox keys
+    if select_all:
+        for s in unique_sources_sorted:
+            st.session_state[f"{key_prefix}_{s}"] = True
+
+    if deselect_all:
+        for s in unique_sources_sorted:
+            st.session_state[f"{key_prefix}_{s}"] = False
+
+    st.write("Select sources:")
+
+    # --- 3 column checkbox grid
+    cols = st.columns(n)
+    selected = []
+
+    for i, s in enumerate(unique_sources_sorted):
+        col = cols[i % n]
+        with col:
+            # Initialize default only once (if key not present)
+            k = f"{key_prefix}_{s}"
+            if k not in st.session_state:
+                st.session_state[k] = True  # default checked
+
+            checked = st.checkbox(s, key=k)
+            if checked:
+                selected.append(s)
+
+    return selected
+
+def is_allowed_source(meta_id, meta_data_dict, selected_sources):
+    """
+    Returns True if the metadata item belongs to a selected source.
+    - If selected_sources is empty → allow nothing
+    - If source is missing → exclude
+    """
+    if not selected_sources:
+        return False
+
+    meta = meta_data_dict.get(meta_id)
+    if not meta:
+        return False
+
+    return meta.get("source") in selected_sources
+
+
 # PIN -------------------- UI --------------------
 st.title("🕵️ STEP 3 : Keyword Matching")
 
@@ -573,14 +636,24 @@ else:
     modelname = "models_local/all-MiniLM-L6-v2"
     model = load_sentence_model(modelname = modelname)
 
-
+    
     index_vocabs, dict_vocabs = load_vocab_indexes(modelname = modelname)
+    unique_sources = {v.get("source") for v in dict_vocabs.values() if v.get("source")}
+
     vocab_list = [v["label"] for v in dict_vocabs.values() if "label" in v]
 
-    # Add a key to store the vocabulary matching results in session state
-    if "vocab_matching_results" not in st.session_state:
-        st.session_state["vocab_matching_results"] = {}
+    selected_sources = sources_selector_ncols(unique_sources)
 
+
+    if "vocab_oversized_matching_results" not in st.session_state:
+        st.session_state["vocab_oversized_matching_results"] = {}
+
+
+    if "vocab_row_selection" not in st.session_state:
+        st.session_state["vocab_row_selection"] = {}
+
+    if "vocab_row_selection_status" not in st.session_state:
+        st.session_state["vocab_row_selection_status"] = {}
 
     if st.button("Find Vocabulary Terms In Thesaury"):
 
@@ -589,20 +662,68 @@ else:
 
             #TODO: investigate how to filter voc provider. READ; https://github.com/Undertone0809/langchain/blob/patch-duckduckgo/docs/modules/indexes/vectorstores/examples/faiss.ipynb
             with st.spinner(f"🔎 Finding nearest vocabulary terms - {key}..."):
-                result_dict = find_nearest_vocab(
+                raw_result_listdict = find_nearest_vocab(
                     meta_df,                         # dataframe with searchterm. necesarry columns; ["Variable", "Description"]
                     _index_lib=index_vocabs,          # FAISS index
                     meta_data_dict=dict_vocabs,      # mapping dict
-                    k_nearest=4
+                    k_nearest=50
                 )
             
-            st.session_state["vocab_matching_results"][key] = result_dict
+        st.session_state["vocab_oversized_matching_results"][key] = raw_result_listdict
+        st.session_state["vocab_row_selection"][key] = {}
+        for result in raw_result_listdict:
+            key_result = result.get('id')
+            st.session_state["vocab_row_selection"][key][key_result]=False
+        st.session_state["vocab_row_selection_status"][key]="initialised"
+
         st.success("✅ Matching complete!")
+
+    if "vocab_matching_results" not in st.session_state:
+        st.session_state["vocab_matching_results"] = {}
+
+
+    if st.session_state["vocab_oversized_matching_results"]:
+
+        if not selected_sources:
+            st.warning("⚠️ Please select at least one vocabulary source.")
+            st.stop()
+
+        for key, k_dict in st.session_state["vocab_oversized_matching_results"].items():
+            filtered_results = [
+                hit for hit in k_dict
+                if hit.get("source") in selected_sources
+            ]
+
+            grouped = defaultdict(list)
+            for hit in filtered_results:
+                grouped[hit["query"]].append(hit)
+
+            
+            final_results = []
+            keys_closest_filtered = []
+            for query, hits in grouped.items():
+                hits_sorted = sorted(
+                    hits,
+                    key=lambda x: x["Distance"],
+                    reverse=False
+                )
+                keys_closest_filtered.append(hits_sorted[0]["id"])
+                final_results.extend(hits_sorted[:4])
+
+
+            st.session_state["vocab_matching_results"][key] = final_results
+
+            if not st.session_state["vocab_row_selection_status"][key] =="initialised":
+                continue
+
+            for key_closest_filtered in keys_closest_filtered:
+                st.session_state["vocab_row_selection"][key][key_closest_filtered] = True
+            st.session_state["vocab_row_selection_status"][key] = "first proces done"
+
 
 
     if st.session_state["vocab_matching_results"]:
 
-        st.write(st.session_state["vocab_matching_results"] )
         tab_labels_matching = list(st.session_state["vocab_matching_results"].keys())
         tabs_matching = st.tabs(tab_labels_matching)
 
@@ -611,13 +732,18 @@ else:
             with tab:
                 vocab_match_dict = st.session_state["vocab_matching_results"][key]
                 result_df = pd.DataFrame(vocab_match_dict)
+                st.write(vocab_match_dict)
 
-                # Add a checkbox column if it doesn't exist
-                if "Selected" not in result_df.columns:
-                    result_df.insert(1, "Selected", False) 
-                    # Set "Selected" to True for the row with the lowest Distance in each group of "query"
-                    idx_min_distance = result_df.groupby("query")["Distance"].idxmin()
-                    result_df.loc[idx_min_distance, "Selected"] = True
+                ## Add a checkbox column if it doesn't exist
+                # if "Selected" not in result_df.columns:
+                #     result_df.insert(1, "Selected", False) 
+                #     # Set "Selected" to True for the row with the lowest Distance in each group of "query"
+                #     idx_min_distance = result_df.groupby("query")["Distance"].idxmin()
+                #     result_df.loc[idx_min_distance, "Selected"] = True
+                
+                result_df["Selected"] = result_df["id"].map(
+                    lambda rid: st.session_state["vocab_row_selection"][key].get(rid, False)
+                )
 
                 #TODO: process only once?
                 styled_df = add_visual_row_group(result_df)
@@ -627,7 +753,7 @@ else:
                 disabling_columns.remove("Selected")
                 priority_cols = [" ", "Selected", "query", "label", "definition"]
                 new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
-
+                new_order.remove("id")
 
                 edited_df = st.data_editor(
                     styled_df,
@@ -638,6 +764,10 @@ else:
                     key=f"editable_vocab_df_{key}",
                     hide_index=True
                 )
+
+                # update the selected items
+                for _, row in edited_df.iterrows():
+                    st.session_state["vocab_row_selection"][row["id"]] = row["Selected"]
 
                 # Process the selected rows
                 selected_rows = edited_df[edited_df["Selected"]].copy()
