@@ -1,0 +1,29 @@
+PREFIX sosa: <http://www.w3.org/ns/sosa/>
+PREFIX qudt: <http://qudt.org/schema/qudt/>
+PREFIX qkdv:         <http://qudt.org/vocab/dimensionvector/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+
+SELECT  ?unit ?label ?labelLang ?description ?symbol ?ucumCode ?DimensionVector ?QuantityKind ?QuantityKindDescription  ?conversionMultiplier ?baseUnit ?UnitOfSystem   ?applicableSystem
+WHERE {
+    ?unit a qudt:Unit .
+
+    OPTIONAL { ?unit qudt:scalingOf ?baseUnit }
+    OPTIONAL { ?unit qudt:definedUnitOfSystem ?UnitOfSystem }
+    OPTIONAL { ?unit qudt:applicableSystem  ?applicableSystem }
+    OPTIONAL { ?unit qudt:hasDimensionVector ?DimensionVector }
+    OPTIONAL { ?unit qudt:hasQuantityKind ?QuantityKind }
+    OPTIONAL { ?unit qudt:conversionMultiplier ?conversionMultiplier }
+    OPTIONAL { ?unit rdfs:label ?label.
+                BIND(LANG(?label) AS ?labelLang) }
+    OPTIONAL { ?unit dcterms:description ?description }
+    OPTIONAL { ?unit qudt:ucumCode ?ucumCode }
+    OPTIONAL { ?unit qudt:symbol ?symbol }
+    OPTIONAL { ?QuantityKind dcterms:description ?QuantityKindDescription }
+    #FILTER (?DimensionVector = qkdv:A0E0L1I0M0H0T0D0)
+
+}
+order by ?DimensionVector
+
+
+
