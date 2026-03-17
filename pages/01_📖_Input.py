@@ -448,6 +448,7 @@ def get_metadata_from_Zenodo_id(record_id:int) -> dict:
             st.error("No metadata found in the Zenodo record.")
             raise ValueError("No metadata in record")
     except Exception as e:
+        st.write(e)
         st.error(f"Failed to fetch or read metadata from URL: {url_input}")
     
     return response_json["metadata"]
@@ -470,6 +471,8 @@ def get_files_URL_from_Zenodo_id(record_id:int,extensions: Optional[Sequence[str
     except Exception as e:
         st.write(e)
         st.error(f"Failed to fetch or read tabular data from URL: {url_input}")
+        return []
+        
     
 
     files = response_json["files"]

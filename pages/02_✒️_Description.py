@@ -457,6 +457,8 @@ def generate_descriptions_with_LLM(var_list: List[str],
 
         with st.spinner(f"🪶 The gnomes are working in colaboration with {provider_selected}..."):
             callfunc = LLM_selection_info.get(provider_selected, {}).get("callfunction")
+            
+            #TODO; catch when no internet connection is made -> or any other bad call
             raw_output = callfunc(prompt)
 
 
@@ -1348,6 +1350,8 @@ else:
 
     st.markdown("### Manual variable descriptions")
     st.caption("Want some LLM power to help? keep scrolling down!")
+
+    #BUG: when there is a new dataset loaded. The old one keeps being presented here??
     meta_dict_description = st.session_state.get(meta_key)
     tab_labels = list(meta_dict_description.keys())
     tabs = st.tabs(tab_labels)
@@ -1541,7 +1545,7 @@ else:
 
                 for key,meta_df_description in meta_dict_description.items():
                     variable_names = list(meta_df_description['name'])
-                    st.write(all_context_text[:30000])
+
                     AI_descriptions = generate_descriptions_with_LLM(var_list = variable_names,
                                                                     context = all_context_text,
                                                                     human_description = meta_df_description['description'],
