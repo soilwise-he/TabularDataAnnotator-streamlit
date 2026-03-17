@@ -19,7 +19,8 @@ import requests
 import ast
 import csv
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_cache_button
-
+from pathlib import Path
+from typing import Optional, Sequence, Union
 from collections import defaultdict
 
 
@@ -91,9 +92,15 @@ def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(cols)
 
+def _read_bytes(source: Union[Path, str, "st.runtime.uploaded_file_manager.UploadedFile"]) -> bytes:
+    if hasattr(source, "getvalue"):          # UploadedFile
+        return source.getvalue()
+    return Path(source).read_bytes()         # path-like
+
 @st.cache_resource()
 def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
-    raw = uploaded_file.getvalue()
+    raw = _read_bytes(uploaded_file)
+    #raw = uploaded_file.getvalue()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -615,7 +622,63 @@ def is_allowed_source(meta_id, meta_data_dict, selected_sources):
 
     return meta.get("source") in selected_sources
 
+def _default_for_value(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return None
+    if isinstance(v, str):
+        return ""
+    if isinstance(v, list):
+        return []
+    if isinstance(v, dict):
+        return {}
+    return None
 
+def make_blank_hit_smart(query, hits, force_keys=("query", "source")):
+    sample = {}
+    keys = set()
+
+    for h in hits:
+        if not isinstance(h, dict):
+            continue
+        keys.update(h.keys())
+        for k, v in h.items():
+            if k not in sample and v is not None:
+                sample[k] = v
+
+    keys.update(force_keys)
+
+    blank = {k: _default_for_value(sample.get(k)) for k in keys}
+    blank["query"] = query
+    return blank
+
+@st.cache_resource()
+def get_UoM_Ansis_guess(dict_vocab:Dict)-> Dict:
+    results_dict = defaultdict(dict)
+    for key, k_dict in dict_vocab.items():
+        results_dict[key]= defaultdict(dict)
+        dict_selection = st.session_state["vocab_row_selection"][key]
+        filtered_results_ansis = [
+            hit for hit in k_dict
+            if hit.get("source") in ["Ansis"]
+        ]
+        for hit in k_dict:
+            results_dict[key][hit.get('query')]=defaultdict(dict)
+
+        for hit in filtered_results_ansis:
+            selected = dict_selection[hit.get('id')]
+            hit['Selected'] = selected
+            uri = hit.get("uri")
+            hit['applicableUnit'] = applicable_unit_map.get(uri,'')
+            hit['quantityKind'] = quantity_kind_map.get(uri,'')
+            results_dict[key][hit.get('query')].setdefault("Potential_UoM", []).append((hit['applicableUnit'],hit['quantityKind']))
+            if selected:
+                results_dict[key][hit.get('query')]['selected_UoM'] = (hit['applicableUnit'],hit['quantityKind'])
+            
+        return results_dict
 # PIN -------------------- UI --------------------
 st.title("🕵️ STEP 3 : Keyword Matching")
 
@@ -698,10 +761,19 @@ else:
             for hit in filtered_results:
                 grouped[hit["query"]].append(hit)
 
+            # keep filtered-out items and return blanks
+            original_headers = list(dict.fromkeys(hit.get("query") for hit in k_dict))
             
+            grouped_incl_blank = {
+                q: grouped.get(q, [make_blank_hit_smart(q, k_dict)])
+                for q in original_headers
+            }
+
+
             final_results = []
             keys_closest_filtered = []
-            for query, hits in grouped.items():
+            for query, hits in grouped_incl_blank.items():
+                
                 hits_sorted = sorted(
                     hits,
                     key=lambda x: x["Distance"],
@@ -732,7 +804,6 @@ else:
             with tab:
                 vocab_match_dict = st.session_state["vocab_matching_results"][key]
                 result_df = pd.DataFrame(vocab_match_dict)
-                st.write(vocab_match_dict)
 
                 ## Add a checkbox column if it doesn't exist
                 # if "Selected" not in result_df.columns:
@@ -748,6 +819,7 @@ else:
                 #TODO: process only once?
                 styled_df = add_visual_row_group(result_df)
 
+                #TODO: change headers? Also include " original header description"?
                 column_list = styled_df.columns.tolist()
                 disabling_columns= column_list.copy()
                 disabling_columns.remove("Selected")
@@ -768,6 +840,7 @@ else:
                 # update the selected items
                 for _, row in edited_df.iterrows():
                     st.session_state["vocab_row_selection"][row["id"]] = row["Selected"]
+
 
                 # Process the selected rows
                 selected_rows = edited_df[edited_df["Selected"]].copy()
@@ -817,6 +890,21 @@ else:
 
                 else:
                     st.info("No rows selected.")
+
+
+    # Prep UoM section with Ansis links
+    if st.session_state["vocab_oversized_matching_results"]:
+        vocab_csv = "data\partial_results.csv"
+        df_vocabs = read_csv_with_sniffer(Path(vocab_csv))
+        applicable_unit_map = df_vocabs.set_index("concept")["applicableUnit"].to_dict()
+        quantity_kind_map   = df_vocabs.set_index("concept")["quantityKind"].to_dict()
+
+        if "ansis_UoM" not in st.session_state:
+            st.session_state["ansis_UoM"] = defaultdict(dict)
+        
+        st.session_state["ansis_UoM"] = get_UoM_Ansis_guess(st.session_state["vocab_oversized_matching_results"])
+
+
 
 
 
