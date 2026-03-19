@@ -656,11 +656,13 @@ def make_blank_hit_smart(query, hits, force_keys=("query", "source")):
     return blank
 
 @st.cache_resource()
-def get_UoM_Ansis_guess(dict_vocab:Dict)-> Dict:
+def get_UoM_Ansis_guess(dict_vocab:Dict, dicts_selection:Dict)-> Dict:
     results_dict = defaultdict(dict)
     for key, k_dict in dict_vocab.items():
+
+        dict_selection = dicts_selection.get(key, {})
+
         results_dict[key]= defaultdict(dict)
-        dict_selection = st.session_state["vocab_row_selection"][key]
         filtered_results_ansis = [
             hit for hit in k_dict
             if hit.get("source") in ["Ansis"]
@@ -787,10 +789,11 @@ else:
 
             if not st.session_state["vocab_row_selection_status"][key] =="initialised":
                 continue
-
             for key_closest_filtered in keys_closest_filtered:
                 st.session_state["vocab_row_selection"][key][key_closest_filtered] = True
             st.session_state["vocab_row_selection_status"][key] = "first proces done"
+            #TODO: check if naming is good -> is this only first selction of needs to be updated after every selction?
+
 
 
 
@@ -827,6 +830,7 @@ else:
                 new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
                 new_order.remove("id")
 
+                #BUG: every edit everything jumps. Probably because of rerun and new styled_df?
                 edited_df = st.data_editor(
                     styled_df,
                     disabled =disabling_columns,
@@ -837,10 +841,11 @@ else:
                     hide_index=True
                 )
 
-                # update the selected items
-                for _, row in edited_df.iterrows():
-                    st.session_state["vocab_row_selection"][row["id"]] = row["Selected"]
-
+                if not edited_df.equals(styled_df):
+                    # update the selected items
+                    for _, row in edited_df.iterrows():
+                        st.session_state["vocab_row_selection"][key][row["id"]] = row["Selected"]
+                    st.rerun()
 
                 # Process the selected rows
                 selected_rows = edited_df[edited_df["Selected"]].copy()
@@ -894,16 +899,18 @@ else:
 
     # Prep UoM section with Ansis links
     if st.session_state["vocab_oversized_matching_results"]:
+        
         vocab_csv = "data\partial_results.csv"
         df_vocabs = read_csv_with_sniffer(Path(vocab_csv))
         applicable_unit_map = df_vocabs.set_index("concept")["applicableUnit"].to_dict()
         quantity_kind_map   = df_vocabs.set_index("concept")["quantityKind"].to_dict()
 
-        if "ansis_UoM" not in st.session_state:
-            st.session_state["ansis_UoM"] = defaultdict(dict)
-        
-        st.session_state["ansis_UoM"] = get_UoM_Ansis_guess(st.session_state["vocab_oversized_matching_results"])
+        for key, meta_df in meta_dict.items():
+            if "ansis_UoM" not in st.session_state:
+                st.session_state["ansis_UoM"] = defaultdict(dict)
 
+            dict_selection = st.session_state["vocab_row_selection"]
+            st.session_state["ansis_UoM"] = get_UoM_Ansis_guess(st.session_state["vocab_oversized_matching_results"], dict_selection)
 
 
 
