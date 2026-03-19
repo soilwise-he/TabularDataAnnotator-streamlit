@@ -31,6 +31,7 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 # -------------------- Helper data and functions --------------------
 
+# !! in UoM procedure, it's hardcoded filtered on "numeric"
 DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
 
 
@@ -766,6 +767,9 @@ if mode == 'linked' and site_df is not None and obs_df is not None:
             tabular_dict[filename] = uploaded_df
         except Exception as e:
             st.error(f"Failed to merge tables: {e}")
+
+meta_key = f"metadata_df"
+st.session_state[meta_key] = tabular_dict
 
 with col2:
     #TODO: change to dict !!!!
