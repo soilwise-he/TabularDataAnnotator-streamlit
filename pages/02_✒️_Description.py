@@ -325,19 +325,19 @@ def save_cache(cache):
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
-def make_hash(context_text: str, variable_names: list,provider:str):
+def make_hash(context_text: str, variable_names: list,provider:str, process:str):
     """Generate a reproducible hash for this exact query."""
-    text = provider.strip() + "|" + context_text.strip() + "|" + ",".join(variable_names)
+    text = provider.strip()+ "|" + process.strip() +  "|" + context_text.strip() + "|" + ",".join(variable_names)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def get_cached_result(context_text, variable_names,provider):
+def get_cached_result(context_text, variable_names,provider,process):
     cache = load_cache()
-    key = make_hash(context_text, variable_names,provider)
+    key = make_hash(context_text, variable_names,provider,process)
     return cache.get(key)
 
-def store_result(context_text, variable_names, response_text, provider):
+def store_result(context_text, variable_names, response_text, provider,process):
     cache = load_cache()
-    key = make_hash(context_text, variable_names,provider)
+    key = make_hash(context_text, variable_names,provider,process)
     old_entry = cache.get(key)
 
     new_version = (old_entry["version"] + 1) if old_entry else 1
@@ -347,7 +347,8 @@ def store_result(context_text, variable_names, response_text, provider):
         "response": response_text,
         "version": new_version,
         "timestamp": datetime.now().isoformat(),
-        "provider": provider
+        "provider": provider,
+        "process":process
     }
     save_cache(cache)
 
@@ -432,8 +433,11 @@ def get_response_Apertus(prompt: str) -> str:
 def generate_descriptions_with_LLM(var_list: List[str],
                                    context: str,
                                    human_description: Dict,
-                                   cache_feedback,
+                                   cache_feedback, # Streamlit placeholder for feedback
                                    tablename:str) -> Dict[str, str]:
+    
+    process = 'descriptions'
+
     if not human_description is None:
         # Use human descriptions as hints
         var_list = [f"{var} (hint: {human_description.get(var, '')})" for var in var_list]
@@ -447,667 +451,109 @@ def generate_descriptions_with_LLM(var_list: List[str],
     Return a JSON object where each key is a variable name and each value is a concise, factual definition (1–2 sentences) derived from the context. Use neutral, scientific language that describes *what the variable represents* or *how it is measured*, without inferring purpose, function, or evaluation. If the context does not provide enough information, make an educated guess based only on naming conventions and scientific norms, while remaining neutral.
     """
 
-    # Check cache before calling OpenAI
-    cached = get_cached_result(context, var_list, provider_selected)
-    raw_output = None
-    if cached:
-        cache_feedback.info(f"✅ Found cached result (version {cached['version']}, saved {cached['timestamp']}) - {tablename}")
-        raw_output = cached["response"]
-    else:
-
-        with st.spinner(f"🪶 The gnomes are working in colaboration with {provider_selected}..."):
-            callfunc = LLM_selection_info.get(provider_selected, {}).get("callfunction")
-            
-            #TODO; catch when no internet connection is made -> or any other bad call
-            raw_output = callfunc(prompt)
-
-
-        store_result(context, var_list, raw_output,provider_selected)
-        cache_feedback.success(f"✅ Saved new response to cache for {tablename}")
-        
-        # st.subheader("Raw OpenAI Output")
-        # st.text_area("Raw Response", raw_output, height=300)
-        
-    if raw_output:
-        st.session_state["raw_output"] = raw_output  # Save raw output        
-        # --- Try to parse JSON ---
-        try:
-
-            variable_descriptions = parse_openai_json(raw_output)
-            st.session_state["variable_descriptions"] = variable_descriptions
-
-
-        except json.JSONDecodeError:
-            st.error("Failed to parse JSON. Please check the raw response above.")
-
+    variable_descriptions = from_prompt_to_json(
+        prompt=prompt,
+        process=process,
+        context=context,
+        var_list=var_list,
+        provider_selected=provider_selected,
+        cache_feedback=cache_feedback,
+        tablename=tablename,
+    )
     return variable_descriptions
 
 def generate_UoM_with_LLM(var_list: List[str],
                                    context: str,
-                                   human_description: Dict,
                                    cache_feedback,
                                    tablename:str) -> Dict[str, str]:
-    if not human_description is None:
-        # Use human descriptions as hints
-        var_list = [f"{var} (hint: {human_description.get(var, '')})" for var in var_list]
+
+    process = "UoM"
     prompt = f"""
-    You are given a list of variables from a CSV file and some contextual documentation. For some variables, a hint will be given.
+    You are given a list of variables from a CSV file and some contextual documentation.
     Context:\n{context[:40000]}
     
     Variables: {var_list}
     
     
-    Return a JSON object where each key is a variable name and 2 levels; 'UoM' and 'UoM kind'. Where 'UoM' is a found unit of measurement inside the Context for this variable name, leave it empty when no exact match is found. 'UoM kind'is one of the quantity kinds of QUDT and is one of the following list: ['Unknown',
-    'InverseAmountOfSubstance',
-    'MolarMass',
-    'MolarOpticalRotatoryPower',
-    'MolarAbsorptionCoefficient',
-    'MolarAttenuationCoefficient',
-    'MolarHeatCapacity',
-    'MolarEntropy',
-    'MolarAngularMomentum',
-    'MolarEnergy',
-    'ChemicalAffinity',
-    'ElectricPolarizability',
-    'EnergyPerMassAmountOfSubstance',
-    'HenrysLawVolatilityConstant',
-    'AtmosphericHydroxylationRate',
-    'SecondOrderReactionRateConstant',
-    'MolarRefractivity',
-    'MolarVolume',
-    'LengthMolarEnergy',
-    'ElectricChargePerAmountOfSubstance',
-    'MolarConductivity',
-    'MassPerElectricCharge',
-    'MagneticField',
-    'MagneticFluxDensity',
-    'EnergyPerAreaElectricCharge',
-    'MagneticVectorPotential',
-    'MagneticFluxPerLength',
-    'ScalarMagneticPotential',
-    'ElectricFieldStrength',
-    'ElectricField',
-    'ForcePerElectricCharge',
-    'SeebeckCoefficient',
-    'ThomsonCoefficient',
-    'MagneticFlux',
-    'ElectricPotential',
-    'ElectricPotentialDifference',
-    'EnergyPerElectricCharge',
-    'Voltage',
-    'PowerPerElectricCharge',
-    'HallCoefficient',
-    'MagneticDipoleMoment',
-    'ElectricFlux',
-    'ElectromagneticPermeability',
-    'Permeability',
-    'LinearResistance',
-    'Inductance',
-    'Permeance',
-    'Resistance',
-    'Impedance',
-    'ModulusOfImpedance',
-    'Reactance',
-    'ElectricalResistance',
-    'Resistivity',
-    'ResidualResistivity',
-    'InversePermittivity',
-    'LorenzCoefficient',
-    'StressIntensityFactor',
-    'ThermalResistivity',
-    'SpecificHeatVolume',
-    'InverseLengthTemperature',
-    'LinearBitDensity',
-    'AngularWavenumber',
-    'DebyeAngularWavenumber',
-    'FermiAngularWavenumber',
-    'Repetency',
-    'PropagationCoefficient',
-    'PhaseCoefficient',
-    'LinearIonization',
-    'AngularReciprocalLatticeVector',
-    'AttenuationCoefficient',
-    'CurvatureFromRadius',
-    'InverseLength',
-    'LinearAbsorptionCoefficient',
-    'LinearAttenuationCoefficient',
-    'LinearLogarithmicRatio',
-    'DotsPerInch',
-    'LineicResolution',
-    'Curvature',
-    'VapourPermeance',
-    'Pace',
-    'TemperatureGradient',
-    'PressureCoefficient',
-    'VolumetricHeatCapacity',
-    'DynamicViscosity',
-    'Viscosity',
-    'EnergyDensity',
-    'ForcePerArea',
-    'VaporPressure',
-    'BulkModulus',
-    'Fugacity',
-    'ModulusOfElasticity',
-    'ShearModulus',
-    'ModulusOfLinearSubgradeReaction',
-    'VolumicElectromagneticEnergy',
-    'ElectromagneticEnergyDensity',
-    'RadiantEnergyDensity',
-    'Pressure',
-    'PowerDensity',
-    'PowerPerVolume',
-    'SpectralRadiance',
-    'ForcePerAreaTime',
-    'MassPerLength',
-    'LinearMass',
-    'LinearDensity',
-    'InverseEnergy',
-    'CostPerEnergy',
-    'CostPerPower',
-    'ThermalResistance',
-    'PhotonRadiance',
-    'Flux',
-    'SurfaceActivityDensity',
-    'ParticleFluenceRate',
-    'AreaBitDensity',
-    'ParticleFluence',
-    'CostPerArea',
-    'MassPerEnergy',
-    'MassPerAreaTime',
-    'SpecificAcousticImpedance',
-    'AcousticImpedance',
-    'CharacteristicAcousticImpedance',
-    'PressureGradient',
-    'SpectralRadiantEnergyDensity',
-    'SpecificWeight',
-    'ModulusOfSubgradeReaction',
-    'PressureLossPerLength',
-    'MassPerArea',
-    'SurfaceDensity',
-    'MeanMassRange',
-    'BodyMassIndex',
-    'SoundExposure',
-    'LuminousEfficacy',
-    'Luminance',
-    'LuminousFluxPerArea',
-    'LuminousExposure',
-    'Slowing-DownDensity',
-    'ActivityConcentration',
-    'ParticleSourceDensity',
-    'VolumetricBitDensity',
-    'InverseVolume',
-    'NumberDensity',
-    'AbsoluteActivity',
-    'VibrationalDensityOfStates',
-    'SpectralDensityOfVibrationalModes',
-    'MassConcentrationRateOfChange',
-    'CatalyticActivityConcentration',
-    'Density',
-    'MassDensity',
-    'MassConcentration',
-    'MassBasedBloodGlucoseLevel',
-    'MassConcentrationOfWaterVapour',
-    'MassConcentrationOfWater',
-    'InverseSquareEnergy',
-    'PressureInRelationToVolumeFlowRate',
-    'EnergyDensityOfStates',
-    'MassicActivity',
-    'SpecificActivity',
-    'InverseMass',
-    'CostPerMass',
-    'EinsteinCoefficients',
-    'MechanicalMobility',
-    'LinearCompressibility',
-    'SpectralAngularCrossSection',
-    'SpectralCrossSection',
-    'AreaPerPower',
-    'ThermalInsulance',
-    'InverseSquareMass',
-    'InverseTimeTemperature',
-    'ThermalExpansionCoefficient',
-    'ExpansionRatio',
-    'LinearExpansionCoefficient',
-    'InverseTemperature',
-    'RelativePressureCoefficient',
-    'ApparentThermalInertia',
-    'Frequency',
-    'FloatingPointCalculationCapability',
-    'Activity',
-    'DataRate',
-    'InformationFlowRate',
-    'Incidence',
-    'CountRate',
-    'RotationalVelocity',
-    'RotationalFrequency',
-    'AngularFrequency',
-    'AngularVelocity',
-    'RateOfChange',
-    'PhotonIntensity',
-    'TemporalSummationFunction',
-    'BitRate',
-    'MassSpecificBiogeochemicalRate',
-    'ByteRate',
-    'DecayConstant',
-    'VideoFrameRate',
-    'MortalityRate',
-    'MorbidityRate',
-    'RespiratoryRate',
-    'HeartRate',
-    'AngularAcceleration',
-    'InverseSquareTime',
-    'AtomicNumber',
-    'VoltageRatio',
-    'Turns',
-    'TransmittanceDensity',
-    'TotalIonization',
-    'TimeRatio',
-    'ThermalUtilizationFactor',
-    'ThermalDiffusionRatio',
-    'ThermalDiffusionFactor',
-    'StructureFactor',
-    'StatisticalWeight',
-    'StandardAbsoluteActivity',
-    'Short-RangeOrderParameter',
-    'ServiceFactor',
-    'ResonanceEscapeProbability',
-    'ResistanceRatio',
-    'RelativeMassRatioOfVapour',
-    'RelativeMassExcess',
-    'RelativeMassDensity',
-    'RelativeMassConcentrationOfVapour',
-    'RefractiveIndex',
-    'ReflectanceFactor',
-    'Reflectance',
-    'Reactivity',
-    'RatioOfSpecificHeatCapacities',
-    'RadianceFactor',
-    'QualityFactor',
-    'PowerFactor',
-    'PoissonRatio',
-    'PermittivityRatio',
-    'PackingFraction',
-    'OsmoticCoefficient',
-    'OrderOfReflection',
-    'NumberOfParticles',
-    'Non-LeakageProbability',
-    'NeutronYieldPerFission',
-    'NeutronYieldPerAbsorption',
-    'NapierianAbsorbance',
-    'MultiplicationFactor',
-    'MobilityRatio',
-    'MassRatioOfWaterVapourToDryGas',
-    'MassRatioOfWaterToDryMatter',
-    'MassFractionOfWater',
-    'MassFractionOfDryMatter',
-    'MassFraction',
-    'MagneticSusceptability',
-    'MadelungConstant',
-    'LuminousFluxRatio',
-    'LossFactor',
-    'Long-RangeOrderParameter',
-    'LogarithmicFrequencyInterval',
-    'LogOctanolWaterPartitionCoefficient',
-    'LogOctanolAirPartitionCoefficient',
-    'Lethargy',
-    'LengthRatio',
-    'LeakageFactor',
-    'LandeGFactor',
-    'IsentropicExponent',
-    'InternalConversionFactor',
-    'GruneisenParameter',
-    'GeneralizedVelocity',
-    'GeneralizedMomentum',
-    'GeneralizedForce',
-    'GeneralizedCoordinate',
-    'GFactorOfNucleus',
-    'FrictionCoefficient',
-    'FastFissionFactor',
-    'EquilibriumConstant',
-    'Emissivity',
-    'ElectricSusceptibility',
-    'EinsteinTransitionProbability',
-    'Duv',
-    'DutyCycle',
-    'DoseEquivalentQualityFactor',
-    'Dissipance',
-    'DimensionlessRatio',
-    'Dimensionless',
-    'DegreeOfDissociation',
-    'Debye-WallerFactor',
-    'CouplingFactor',
-    'Count',
-    'Constringence',
-    'Chromaticity',
-    'CanonicalPartitionFunction',
-    'BioconcentrationFactor',
-    'BindingFraction',
-    'AverageLogarithmicEnergyDecrement',
-    'Absorptance',
-    'ActivityCoefficient',
-    'AtomScatteringFactor',
-    'InformationEntropy',
-    'DatasetOfBits',
-    'SolidAngle',
-    'SunProtectionFactorOfAProduct',
-    'EarthquakeMagnitude',
-    'GeneFamilyAbundance',
-    'Angle',
-    'PlaneAngle',
-    'MassRatio',
-    'PressureRatio',
-    'AmountOfSubstanceFraction',
-    'PictureElement',
-    'SoundPressureLevel',
-    'PermeabilityRatio',
-    'ElectromagneticPermeabilityRatio',
-    'RelativeHumidity',
-    'Ratio',
-    'AmountOfCloudCover',
-    'TotalAngularMomentumQuantumNumber',
-    'StoichiometricNumber',
-    'SpinQuantumNumber',
-    'ReynoldsNumber',
-    'QuantumNumber',
-    'PrincipalQuantumNumber',
-    'Population',
-    'OrbitalAngularMomentumQuantumNumber',
-    'OpeningRatio',
-    'NumberOfElectricalPhases',
-    'NucleonNumber',
-    'NuclearSpinQuantumNumber',
-    'NeutronNumber',
-    'MassNumber',
-    'MagneticQuantumNumber',
-    'Landau-GinzburgNumber',
-    'IonTransportNumber',
-    'HyperfineStructureQuantumNumber',
-    'CoefficientOfPerformance',
-    'ChargeNumber',
-    'Turbidity',
-    'VolumeFraction',
-    'Gradient',
-    'TemperatureRatio',
-    'CurrencyPerFlight',
-    'Currency',
-    'DigitRate',
-    'MachNumber',
-    'AreaRatio',
-    'CoolingPerformanceRatio',
-    'StateOfCharge',
-    'SoundReductionIndex',
-    'SoundPowerLevel',
-    'SoundExposureLevel',
-    'SignalDetectionThreshold',
-    'APIGravity',
-    'LuminousIntensityDistribution',
-    'Basicity',
-    'Acidity',
-    'RelativePartialPressure',
-    'Prevalence',
-    'Time',
-    'TimePerCount',
-    'Period',
-    'VapourPermeability',
-    'WaterVaporDiffusionCoefficient',
-    'BiodegredationHalfLife',
-    'FishBiotransformationHalfLife',
-    'SquareTime',
-    'TemperaturePerTime',
-    'TemperaturePerSquareTime',
-    'BoilingPoint',
-    'FlashPoint',
-    'MeltingPoint',
-    'Temperature',
-    'ThermodynamicTemperature',
-    'CorrelatedColorTemperature',
-    'TimeTemperature',
-    'GrowingDegreeDay',
-    'TemperatureVariance',
-    'CoefficientOfHeatTransfer',
-    'CombinedNonEvaporativeHeatTransferCoefficient',
-    'SurfaceCoefficientOfHeatTransfer',
-    'PowerPerAreaQuarticTemperature',
-    'MassFlowRate',
-    'MassPerTime',
-    'EnergyPerArea',
-    'ForcePerLength',
-    'EnergyFluence',
-    'RadiantFluence',
-    'StrainEnergyReleaseRate',
-    'Radiance',
-    'PowerPerArea',
-    'PoyntingVector',
-    'Irradiance',
-    'EnergyFluenceRate',
-    'RadiantEmmitance',
-    'RadiantFluenceRate',
-    'Radiosity',
-    'Mass',
-    'CO2Equivalent',
-    'MolecularMass',
-    'MassTemperature',
-    'LuminousIntensity',
-    'LuminousFlux',
-    'LuminousEnergy',
-    'Fluidity',
-    'IsothermalCompressibility',
-    'InversePressure',
-    'Compressibility',
-    'StressOpticCoefficient',
-    'IsentropicCompressibility',
-    'LinearThermalExpansion',
-    'Velocity',
-    'Speed',
-    'LinearVelocity',
-    'ElectromagneticWavePhaseSpeed',
-    'EvaporativeHeatTransferCoefficient',
-    'SpeedOfLight',
-    'VolumetricFlux',
-    'SurfaceRelatedVolumeFlowRate',
-    'SurfaceRelatedVolumeFlow',
-    'VentilationRatePerFloorArea',
-    'ConductionSpeed',
-    'GroupSpeedOfSound',
-    'PhaseSpeedOfSound',
-    'SoundParticleVelocity',
-    'PropellantBurnRate',
-    'LinearAcceleration',
-    'Acceleration',
-    'BurstFactor',
-    'ThrustToMassRatio',
-    'Length',
-    'Distance',
-    'VolumePerArea',
-    'AreaPerLength',
-    'Rotary-TranslatoryMotionConversion',
-    'ElevationRelativeToNAP',
-    'ThrusterPowerToThrustEfficiency',
-    'LengthTemperature',
-    'LengthTemperatureTime',
-    'ThermalConductivity',
-    'LinearMomentum',
-    'Momentum',
-    'MomentumPerAngle',
-    'Impulse',
-    'Force',
-    'ForcePerAngle',
-    'ModulusOfRotationalSubgradeReaction',
-    'TorquePerLength',
-    'LinearEnergyTransfer',
-    'LinearTorque',
-    'TotalLinearStoppingPower',
-    'LineicPower',
-    'LengthMass',
-    'Unbalance',
-    'SpecificOpticalRotatoryPower',
-    'MassAbsorptionCoefficient',
-    'MassAttenuationCoefficient',
-    'MassEnergyTransferCoefficient',
-    'SpecificSurfaceArea',
-    'SpecificHeatCapacity',
-    'SpecificEntropy',
-    'SpecificHeatCapacityAtConstantPressure',
-    'SpecificHeatCapacityAtConstantVolume',
-    'SpecificHeatCapacityAtSaturation',
-    'MassicHeatCapacity',
-    'AreaThermalExpansion',
-    'KinematicViscosity',
-    'AreaPerTime',
-    'ThermalDiffusionRatioCoefficient',
-    'DiffusionCoefficient',
-    'NeutronDiffusionCoefficient',
-    'Circulation',
-    'SpecificEnergy',
-    'DoseEquivalent',
-    'AbsorbedDose',
-    'Kerma',
-    'SpecificModulus',
-    'AbsorbedDoseRate',
-    'SpecificPower',
-    'KermaRate',
-    'Area',
-    'HydraulicPermeability',
-    'NuclearQuadrupoleMoment',
-    'AreaAngle',
-    'AngularCrossSection',
-    'AreaTime',
-    'AreaTemperature',
-    'AreaTimeTemperature',
-    'HeatCapacity',
-    'EnergyPerTemperature',
-    'Entropy',
-    'ThermalCapacitance',
-    'ThermalConductance',
-    'AngularMomentumPerAngle',
-    'AngularImpulse',
-    'AngularMomentum',
-    'Action',
-    'Energy',
-    'ThermalEnergy',
-    'ExchangeIntegral',
-    'HamiltonFunction',
-    'LagrangeFunction',
-    'LevelWidth',
-    'Torque',
-    'MomentOfForce',
-    'TorquePerAngle',
-    'TorsionalSpringConstant',
-    'RadiantIntensity',
-    'Power',
-    'ElectricPower',
-    'ReactivePower',
-    'ApparentPower',
-    'HeatFlowRate',
-    'MomentOfInertia',
-    'RotationalMass',
-    'SpecificHeatPressure',
-    'SoilAdsorptionCoefficient',
-    'SpecificVolume',
-    'VolumeThermalExpansion',
-    'VolumeFlowRate',
-    'VolumePerTime',
-    'RecombinationCoefficient',
-    'SoundVolumeVelocity',
-    'StandardGravitationalParameter',
-    'Volume',
-    'SectionModulus',
-    'DryVolume',
-    'LiquidVolume',
-    'WarpingMoment',
-    'LengthEnergy',
-    'ThermalEnergyLength',
-    'TotalMassStoppingPower',
-    'SecondAxialMomentOfArea',
-    'SecondMomentOfArea',
-    'SecondPolarMomentOfArea',
-    'TotalAtomicStoppingPower',
-    'MassStoppingPower',
-    'PowerAreaPerSolidAngle',
-    'PowerArea',
-    'SectionAreaIntegral',
-    'WarpingConstant',
-    'MagneticReluctivity',
-    'MagneticFieldStrength',
-    'LinearElectricCurrentDensity',
-    'Coercivity',
-    'ElectricChargeLineDensity',
-    'ElectricChargeLinearDensity',
-    'InverseMagneticFlux',
-    'ElectricCurrentPerEnergy',
-    'ReciprocalVoltage',
-    'RichardsonConstant',
-    'ElectricCurrentDensity',
-    'DisplacementCurrentDensity',
-    'TotalCurrentDensity',
-    'ElectricChargePerArea',
-    'ElectricPolarization',
-    'ElectricChargeSurfaceDensity',
-    'ElectricChargeVolumeDensity',
-    'ElectricChargeDensity',
-    'ExposureRate',
-    'MassicElectricCurrent',
-    'SpecificElectricCurrent',
-    'ElectricChargePerMass',
-    'SpecificElectricCharge',
-    'Mobility',
-    'TemperaturePerMagneticFluxDensity',
-    'ElectricCurrentPerTemperature',
-    'CurrentLinkage',
-    'DisplacementCurrent',
-    'ElectricCurrent',
-    'ElectricCurrentPhasor',
-    'MagneticTension',
-    'MagnetomotiveForce',
-    'TotalCurrent',
-    'ElectricCurrentPerAngle',
-    'ElectricCharge',
-    'BatteryCapacity',
-    'ElectricDipoleMoment',
-    'MagneticAreaMoment',
-    'MagneticMoment',
-    'ElectricQuadrupoleMoment',
-    'Reluctance',
-    'Conductance',
-    'Admittance',
-    'ElectricalConductance',
-    'Capacitance',
-    'ElectricConductivity',
-    'ElectrolyticConductivity',
-    'Conductivity',
-    'Permittivity',
-    'Polarizability',
-    'EnergyPerSquareMagneticFluxDensity',
-    'CubicElectricDipoleMomentPerSquareEnergy',
-    'QuarticElectricDipoleMomentPerCubicEnergy',
-    'ConductivityVariance',
-    'MolarFluxDensity',
-    'PhotosyntheticPhotonFluxDensity',
-    'Concentration',
-    'BloodGlucoseLevel',
-    'WaterSolubility',
-    'SerumLevel',
-    'PlasmaLevel',
-    'AmountOfSubstancePerVolume',
-    'BiogeochemicalRate',
-    'AmountOfSubstancePerMass',
-    'IonicStrength',
-    'MolalityOfSolute',
-    'ReactiveChargePerMass',
-    'MolarFlowRate',
-    'CatalyticActivity',
-    'PhotosyntheticPhotonFlux',
-    'AmountOfSubstance',
-    'ExtentOfReaction',
-    'ReactiveCharge',
-    'MassAmountOfSubstanceTemperature',
-    'TemperatureAmountOfSubstance',
-    'AmountOfSubstancePerMassPressure',
-    'MolarFluxDensityVariance']
-    each value is a concise, factual definition (1–2 sentences) derived from the context. Use neutral, scientific language that describes *what the variable represents* or *how it is measured*, without inferring purpose, function, or evaluation. If the context does not provide enough information, make an educated guess based only on naming conventions and scientific norms, while remaining neutral.
+    Return a JSON object where each key is a variable name and 2nd level; 'UoM', 'UoM kind', 'UoM - Best guess' and 'UoM kind - Best guess'. Where 'UoM' is a found unit of measurement inside the Context for this variable name, leave it empty when no exact match is found. 'UoM kind'is one of the quantity kinds of QUDT and is one of the list below. Both 'UoM - Best guess' and 'UoM kind - Best guess' can be creative best guesses when it isn't clear.
+    ['Unknown','InverseAmountOfSubstance',    'MolarMass',    'MolarOpticalRotatoryPower',    'MolarAbsorptionCoefficient','MolarAttenuationCoefficient','MolarHeatCapacity','MolarEntropy','MolarAngularMomentum','MolarEnergy','ChemicalAffinity','ElectricPolarizability','EnergyPerMassAmountOfSubstance','HenrysLawVolatilityConstant','AtmosphericHydroxylationRate','SecondOrderReactionRateConstant','MolarRefractivity','MolarVolume','LengthMolarEnergy','ElectricChargePerAmountOfSubstance','MolarConductivity','MassPerElectricCharge','MagneticField','MagneticFluxDensity','EnergyPerAreaElectricCharge','MagneticVectorPotential','MagneticFluxPerLength','ScalarMagneticPotential','ElectricFieldStrength','ElectricField','ForcePerElectricCharge','SeebeckCoefficient','ThomsonCoefficient','MagneticFlux','ElectricPotential','ElectricPotentialDifference','EnergyPerElectricCharge','Voltage','PowerPerElectricCharge','HallCoefficient','MagneticDipoleMoment','ElectricFlux','ElectromagneticPermeability','Permeability','LinearResistance','Inductance','Permeance','Resistance','Impedance','ModulusOfImpedance','Reactance','ElectricalResistance','Resistivity','ResidualResistivity','InversePermittivity','LorenzCoefficient','StressIntensityFactor','ThermalResistivity','SpecificHeatVolume','InverseLengthTemperature','LinearBitDensity','AngularWavenumber','DebyeAngularWavenumber','FermiAngularWavenumber','Repetency','PropagationCoefficient','PhaseCoefficient','LinearIonization','AngularReciprocalLatticeVector','AttenuationCoefficient','CurvatureFromRadius','InverseLength','LinearAbsorptionCoefficient','LinearAttenuationCoefficient','LinearLogarithmicRatio','DotsPerInch','LineicResolution','Curvature','VapourPermeance','Pace','TemperatureGradient','PressureCoefficient','VolumetricHeatCapacity','DynamicViscosity','Viscosity','EnergyDensity','ForcePerArea','VaporPressure','BulkModulus','Fugacity','ModulusOfElasticity','ShearModulus','ModulusOfLinearSubgradeReaction','VolumicElectromagneticEnergy','ElectromagneticEnergyDensity','RadiantEnergyDensity','Pressure','PowerDensity','PowerPerVolume','SpectralRadiance','ForcePerAreaTime','MassPerLength','LinearMass','LinearDensity','InverseEnergy','CostPerEnergy','CostPerPower','ThermalResistance','PhotonRadiance','Flux','SurfaceActivityDensity','ParticleFluenceRate','AreaBitDensity','ParticleFluence','CostPerArea','MassPerEnergy','MassPerAreaTime','SpecificAcousticImpedance','AcousticImpedance','CharacteristicAcousticImpedance','PressureGradient','SpectralRadiantEnergyDensity','SpecificWeight','ModulusOfSubgradeReaction','PressureLossPerLength','MassPerArea','SurfaceDensity','MeanMassRange','BodyMassIndex','SoundExposure','LuminousEfficacy','Luminance','LuminousFluxPerArea','LuminousExposure','Slowing-DownDensity','ActivityConcentration','ParticleSourceDensity','VolumetricBitDensity','InverseVolume','NumberDensity','AbsoluteActivity','VibrationalDensityOfStates','SpectralDensityOfVibrationalModes','MassConcentrationRateOfChange','CatalyticActivityConcentration','Density','MassDensity','MassConcentration','MassBasedBloodGlucoseLevel','MassConcentrationOfWaterVapour','MassConcentrationOfWater','InverseSquareEnergy','PressureInRelationToVolumeFlowRate','EnergyDensityOfStates','MassicActivity','SpecificActivity','InverseMass','CostPerMass','EinsteinCoefficients','MechanicalMobility','LinearCompressibility','SpectralAngularCrossSection','SpectralCrossSection','AreaPerPower','ThermalInsulance','InverseSquareMass','InverseTimeTemperature','ThermalExpansionCoefficient','ExpansionRatio','LinearExpansionCoefficient','InverseTemperature','RelativePressureCoefficient','ApparentThermalInertia','Frequency','FloatingPointCalculationCapability','Activity','DataRate','InformationFlowRate','Incidence','CountRate','RotationalVelocity','RotationalFrequency','AngularFrequency','AngularVelocity','RateOfChange','PhotonIntensity','TemporalSummationFunction','BitRate','MassSpecificBiogeochemicalRate','ByteRate','DecayConstant','VideoFrameRate','MortalityRate','MorbidityRate','RespiratoryRate','HeartRate','AngularAcceleration','InverseSquareTime','AtomicNumber','VoltageRatio','Turns','TransmittanceDensity','TotalIonization','TimeRatio','ThermalUtilizationFactor','ThermalDiffusionRatio','ThermalDiffusionFactor','StructureFactor','StatisticalWeight','StandardAbsoluteActivity','Short-RangeOrderParameter','ServiceFactor','ResonanceEscapeProbability','ResistanceRatio','RelativeMassRatioOfVapour','RelativeMassExcess','RelativeMassDensity','RelativeMassConcentrationOfVapour','RefractiveIndex','ReflectanceFactor','Reflectance','Reactivity','RatioOfSpecificHeatCapacities','RadianceFactor','QualityFactor','PowerFactor','PoissonRatio','PermittivityRatio','PackingFraction','OsmoticCoefficient','OrderOfReflection','NumberOfParticles','Non-LeakageProbability','NeutronYieldPerFission','NeutronYieldPerAbsorption','NapierianAbsorbance','MultiplicationFactor','MobilityRatio','MassRatioOfWaterVapourToDryGas','MassRatioOfWaterToDryMatter','MassFractionOfWater','MassFractionOfDryMatter','MassFraction','MagneticSusceptability','MadelungConstant','LuminousFluxRatio','LossFactor','Long-RangeOrderParameter','LogarithmicFrequencyInterval','LogOctanolWaterPartitionCoefficient','LogOctanolAirPartitionCoefficient','Lethargy','LengthRatio','LeakageFactor','LandeGFactor','IsentropicExponent','InternalConversionFactor','GruneisenParameter','GeneralizedVelocity','GeneralizedMomentum','GeneralizedForce','GeneralizedCoordinate','GFactorOfNucleus','FrictionCoefficient','FastFissionFactor','EquilibriumConstant','Emissivity','ElectricSusceptibility','EinsteinTransitionProbability','Duv','DutyCycle','DoseEquivalentQualityFactor','Dissipance','DimensionlessRatio','Dimensionless','DegreeOfDissociation','Debye-WallerFactor','CouplingFactor','Count','Constringence','Chromaticity','CanonicalPartitionFunction','BioconcentrationFactor','BindingFraction','AverageLogarithmicEnergyDecrement','Absorptance','ActivityCoefficient','AtomScatteringFactor','InformationEntropy','DatasetOfBits','SolidAngle','SunProtectionFactorOfAProduct','EarthquakeMagnitude','GeneFamilyAbundance','Angle','PlaneAngle','MassRatio','PressureRatio','AmountOfSubstanceFraction','PictureElement','SoundPressureLevel','PermeabilityRatio','ElectromagneticPermeabilityRatio','RelativeHumidity','Ratio','AmountOfCloudCover','TotalAngularMomentumQuantumNumber','StoichiometricNumber','SpinQuantumNumber','ReynoldsNumber','QuantumNumber','PrincipalQuantumNumber','Population','OrbitalAngularMomentumQuantumNumber','OpeningRatio','NumberOfElectricalPhases','NucleonNumber','NuclearSpinQuantumNumber','NeutronNumber','MassNumber','MagneticQuantumNumber','Landau-GinzburgNumber','IonTransportNumber','HyperfineStructureQuantumNumber','CoefficientOfPerformance','ChargeNumber','Turbidity','VolumeFraction','Gradient','TemperatureRatio','CurrencyPerFlight','Currency','DigitRate','MachNumber','AreaRatio','CoolingPerformanceRatio','StateOfCharge','SoundReductionIndex','SoundPowerLevel','SoundExposureLevel','SignalDetectionThreshold','APIGravity','LuminousIntensityDistribution','Basicity','Acidity','RelativePartialPressure','Prevalence','Time','TimePerCount','Period','VapourPermeability','WaterVaporDiffusionCoefficient','BiodegredationHalfLife','FishBiotransformationHalfLife','SquareTime','TemperaturePerTime','TemperaturePerSquareTime','BoilingPoint','FlashPoint','MeltingPoint','Temperature','ThermodynamicTemperature','CorrelatedColorTemperature','TimeTemperature','GrowingDegreeDay','TemperatureVariance','CoefficientOfHeatTransfer','CombinedNonEvaporativeHeatTransferCoefficient','SurfaceCoefficientOfHeatTransfer','PowerPerAreaQuarticTemperature','MassFlowRate','MassPerTime','EnergyPerArea','ForcePerLength','EnergyFluence','RadiantFluence','StrainEnergyReleaseRate','Radiance','PowerPerArea','PoyntingVector','Irradiance','EnergyFluenceRate','RadiantEmmitance','RadiantFluenceRate','Radiosity','Mass','CO2Equivalent','MolecularMass','MassTemperature','LuminousIntensity','LuminousFlux','LuminousEnergy','Fluidity','IsothermalCompressibility','InversePressure','Compressibility','StressOpticCoefficient','IsentropicCompressibility','LinearThermalExpansion','Velocity','Speed','LinearVelocity','ElectromagneticWavePhaseSpeed','EvaporativeHeatTransferCoefficient','SpeedOfLight','VolumetricFlux','SurfaceRelatedVolumeFlowRate','SurfaceRelatedVolumeFlow','VentilationRatePerFloorArea','ConductionSpeed','GroupSpeedOfSound','PhaseSpeedOfSound','SoundParticleVelocity','PropellantBurnRate','LinearAcceleration','Acceleration','BurstFactor','ThrustToMassRatio','Length','Distance','VolumePerArea','AreaPerLength','Rotary-TranslatoryMotionConversion','ElevationRelativeToNAP','ThrusterPowerToThrustEfficiency','LengthTemperature','LengthTemperatureTime','ThermalConductivity','LinearMomentum','Momentum','MomentumPerAngle','Impulse','Force','ForcePerAngle','ModulusOfRotationalSubgradeReaction','TorquePerLength','LinearEnergyTransfer','LinearTorque','TotalLinearStoppingPower','LineicPower','LengthMass','Unbalance','SpecificOpticalRotatoryPower','MassAbsorptionCoefficient','MassAttenuationCoefficient','MassEnergyTransferCoefficient','SpecificSurfaceArea','SpecificHeatCapacity','SpecificEntropy','SpecificHeatCapacityAtConstantPressure','SpecificHeatCapacityAtConstantVolume','SpecificHeatCapacityAtSaturation','MassicHeatCapacity','AreaThermalExpansion','KinematicViscosity','AreaPerTime','ThermalDiffusionRatioCoefficient','DiffusionCoefficient','NeutronDiffusionCoefficient','Circulation','SpecificEnergy','DoseEquivalent','AbsorbedDose','Kerma','SpecificModulus','AbsorbedDoseRate','SpecificPower','KermaRate','Area','HydraulicPermeability','NuclearQuadrupoleMoment','AreaAngle','AngularCrossSection','AreaTime','AreaTemperature','AreaTimeTemperature','HeatCapacity','EnergyPerTemperature','Entropy','ThermalCapacitance','ThermalConductance','AngularMomentumPerAngle','AngularImpulse','AngularMomentum','Action','Energy','ThermalEnergy','ExchangeIntegral','HamiltonFunction','LagrangeFunction','LevelWidth','Torque','MomentOfForce','TorquePerAngle','TorsionalSpringConstant','RadiantIntensity','Power','ElectricPower','ReactivePower','ApparentPower','HeatFlowRate','MomentOfInertia','RotationalMass','SpecificHeatPressure','SoilAdsorptionCoefficient','SpecificVolume','VolumeThermalExpansion','VolumeFlowRate','VolumePerTime','RecombinationCoefficient','SoundVolumeVelocity','StandardGravitationalParameter','Volume','SectionModulus','DryVolume','LiquidVolume','WarpingMoment','LengthEnergy','ThermalEnergyLength','TotalMassStoppingPower','SecondAxialMomentOfArea','SecondMomentOfArea','SecondPolarMomentOfArea','TotalAtomicStoppingPower','MassStoppingPower','PowerAreaPerSolidAngle','PowerArea','SectionAreaIntegral','WarpingConstant','MagneticReluctivity','MagneticFieldStrength','LinearElectricCurrentDensity','Coercivity','ElectricChargeLineDensity','ElectricChargeLinearDensity','InverseMagneticFlux','ElectricCurrentPerEnergy','ReciprocalVoltage','RichardsonConstant','ElectricCurrentDensity','DisplacementCurrentDensity','TotalCurrentDensity','ElectricChargePerArea','ElectricPolarization','ElectricChargeSurfaceDensity','ElectricChargeVolumeDensity','ElectricChargeDensity','ExposureRate','MassicElectricCurrent','SpecificElectricCurrent','ElectricChargePerMass','SpecificElectricCharge','Mobility','TemperaturePerMagneticFluxDensity','ElectricCurrentPerTemperature','CurrentLinkage','DisplacementCurrent','ElectricCurrent','ElectricCurrentPhasor','MagneticTension','MagnetomotiveForce','TotalCurrent','ElectricCurrentPerAngle','ElectricCharge','BatteryCapacity','ElectricDipoleMoment','MagneticAreaMoment','MagneticMoment','ElectricQuadrupoleMoment','Reluctance','Conductance','Admittance','ElectricalConductance','Capacitance','ElectricConductivity','ElectrolyticConductivity','Conductivity','Permittivity','Polarizability','EnergyPerSquareMagneticFluxDensity','CubicElectricDipoleMomentPerSquareEnergy','QuarticElectricDipoleMomentPerCubicEnergy','ConductivityVariance','MolarFluxDensity','PhotosyntheticPhotonFluxDensity','Concentration','BloodGlucoseLevel','WaterSolubility','SerumLevel','PlasmaLevel','AmountOfSubstancePerVolume','BiogeochemicalRate','AmountOfSubstancePerMass','IonicStrength','MolalityOfSolute','ReactiveChargePerMass','MolarFlowRate','CatalyticActivity','PhotosyntheticPhotonFlux','AmountOfSubstance','ExtentOfReaction','ReactiveCharge','MassAmountOfSubstanceTemperature','TemperatureAmountOfSubstance','AmountOfSubstancePerMassPressure','MolarFluxDensityVariance']
     """
 
+    variable_UoM = from_prompt_to_json(
+        prompt=prompt,
+        process=process,
+        context=context,
+        var_list=var_list,
+        provider_selected=provider_selected,
+        cache_feedback=cache_feedback,
+        tablename=tablename,
+    )
+
+    return variable_UoM
+
+def generate_methode_with_LLM(var_list: List[str],
+                                   context: str,
+                                   cache_feedback, # Streamlit placeholder for feedback
+                                   tablename:str) -> Dict[str, str]:
+    
+    process = 'methode'
+
+    prompt = f"""
+    You are an expert scientific information extractor specialized in soil science and environmental measurements. You are given a list of variables from a CSV file and contextual documentation.
+
+    Context:\n{context[:40000]}
+    
+    Variables: {var_list}
+    
+    
+    
+    Instructions:
+    - For **each variable**, extract the most relevant **measurement method** explicitly mentioned or clearly implied in the context.
+    - Give **strong preference** to:
+    - Standardized or normalized methods (e.g. ISO, EN, CEN, ASTM).
+    - Methods referenced via **DOI**, official standards, or well-known laboratory protocols.
+    - Be **precise and specific**:
+    - Prefer “ISO 10694:1995 – Soil quality – Determination of organic carbon”  
+        over vague descriptions like “measured using standard laboratory methods”.
+    - If multiple methods are mentioned for the same variable:
+    - Select the **primary or most authoritative** one.
+    - If no method can be confidently identified:
+    - Use `null` as the value and do **not** hallucinate.
+
+    Output format:
+    - Return **only valid JSON**.
+    - Each key must be **exactly** the variable name as provided.
+    - Each value must be an object with the following fields:
+    - `method_name`: concise name of the method or standard
+    - `reference`: ISO / EN / CEN code, DOI, or bibliographic reference (if available)
+    - `description`: short, precise description of how the variable is measured
+    - `confidence`: one of `"high"`, `"medium"`, `"low"` based on explicitness in the text
+
+    """
+
+    variable_descriptions = from_prompt_to_json(
+        prompt=prompt,
+        process=process,
+        context=context,
+        var_list=var_list,
+        provider_selected=provider_selected,
+        cache_feedback=cache_feedback,
+        tablename=tablename,
+    )
+    return variable_descriptions
+
+def from_prompt_to_json(
+                        prompt: str,
+                        process: str,
+                        context: str,
+                        var_list: List[str],
+                        provider_selected: str,
+                        cache_feedback, 
+                        tablename: str,
+                    ) -> Dict:
+
     # Check cache before calling OpenAI
-    cached = get_cached_result(context, var_list, provider_selected)
+    cached = get_cached_result(context, var_list, provider_selected, process)
     raw_output = None
     if cached:
         cache_feedback.info(f"✅ Found cached result (version {cached['version']}, saved {cached['timestamp']}) - {tablename}")
@@ -1116,10 +562,14 @@ def generate_UoM_with_LLM(var_list: List[str],
 
         with st.spinner(f"🪶 The gnomes are working in colaboration with {provider_selected}..."):
             callfunc = LLM_selection_info.get(provider_selected, {}).get("callfunction")
+
+            #TODO; catch when no internet connection is made -> or any other bad call
             raw_output = callfunc(prompt)
+        
+        #DEBUG statement
+        st.write(raw_output)
 
-
-        store_result(context, var_list, raw_output,provider_selected)
+        store_result(context, var_list, raw_output,provider_selected, process)
         cache_feedback.success(f"✅ Saved new response to cache for {tablename}")
         
         # st.subheader("Raw OpenAI Output")
@@ -1130,14 +580,13 @@ def generate_UoM_with_LLM(var_list: List[str],
         # --- Try to parse JSON ---
         try:
 
-            variable_descriptions = parse_openai_json(raw_output)
-            st.session_state["variable_descriptions"] = variable_descriptions
-
+            parsed_respons = parse_openai_json(raw_output)
 
         except json.JSONDecodeError:
-            st.error("Failed to parse JSON. Please check the raw response above.")
+            st.info(raw_output)
+            st.error("Failed to parse JSON. Please check the raw response above. for process: {process} and var list: {var_list}")
 
-    return variable_descriptions
+    return parsed_respons
 
 def embed_vocab(word, definition=None, alpha=0.4):
 
@@ -1491,12 +940,6 @@ else:
         placeholder_loaded_context = st.empty()
 
 
-
-
-    # Add a key to store the variable descriptions in session state
-    if "variable_descriptions" not in st.session_state:
-        st.session_state["variable_descriptions"] = None
-
     if st.session_state["context_files"] or custom_context.strip():
         all_context_text = ""
         expanded_load_context = False if custom_context==suggested_text and not st.session_state["context_files"] else True
@@ -1541,6 +984,8 @@ else:
                 
                 status_box = st.empty()
                 cache_box = st.empty()
+                cache_box_UoM = st.empty()
+                cache_box_Methode = st.empty()
                 completed = []
 
                 for key,meta_df_description in meta_dict_description.items():
@@ -1551,8 +996,29 @@ else:
                                                                     human_description = meta_df_description['description'],
                                                                     cache_feedback  = cache_box,
                                                                     tablename = key)
+                    
+                    AI_UoM = generate_UoM_with_LLM(var_list = variable_names,
+                                                                    context = all_context_text,
+                                                                    cache_feedback  = cache_box_UoM,
+                                                                    tablename = key)
+                    
+                    AI_Methode = generate_methode_with_LLM(var_list = variable_names,
+                                                                    context = all_context_text,
+                                                                    cache_feedback  = cache_box_Methode,
+                                                                    tablename = key)
+                    
                     description_df = pd.DataFrame(
                         list(AI_descriptions.items()), columns=["name", "description"]
+                    )
+                    UoM_df = pd.DataFrame(
+                        pd.DataFrame.from_dict(AI_UoM, orient="index")
+                        .reset_index()
+                        .rename(columns={"index": "name"})
+                    )
+                    Methode_df = (
+                        pd.DataFrame.from_dict(AI_Methode, orient="index")
+                        .reset_index()
+                        .rename(columns={"index": "name"})
                     )
 
                     completed.append(key)
@@ -1568,6 +1034,14 @@ else:
                     if "AI_var_descriptions" not in st.session_state:
                         st.session_state["AI_var_descriptions"] = {}
                     st.session_state["AI_var_descriptions"][key] = description_df
+
+                    if "AI_var_UoM" not in st.session_state:
+                        st.session_state["AI_var_UoM"] = {}
+                    st.session_state["AI_var_UoM"][key] = UoM_df
+
+                    if "AI_var_Methode" not in st.session_state:
+                        st.session_state["AI_var_Methode"] = {}
+                    st.session_state["AI_var_Methode"][key] = Methode_df
 
             if "AI_var_descriptions" in st.session_state:
                 AI_var_dict = st.session_state.get('AI_var_descriptions')
