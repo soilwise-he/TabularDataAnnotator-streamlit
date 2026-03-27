@@ -22,6 +22,7 @@ from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_c
 from pathlib import Path
 from typing import Optional, Sequence, Union
 from collections import defaultdict
+from util.metadata import apply_new_metadata_info
 
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
@@ -33,6 +34,9 @@ meta_key = f"metadata_df"
 # -------------------- Helper data and functions --------------------
 
 DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
+
+
+#BUG: General bug "Sourcefile" still in sourcelist of the vocab list !!!
 
 
 def detect_column_type_from_series(s: pd.Series, sample_size: int = 200) -> str:
@@ -172,37 +176,6 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
         st.error(f'Failed to parse metadata file: {e}')
         return None
 
-
-def apply_new_metadata_info(new_metadata_dict: dict, current_meta:dict, overwrite = 'no_overwrite') -> dict:
-    # Function to apply new metadata info from metadata_df to current_meta
-
-    # metadata_df expected to contain 'name' column
-    if new_metadata_dict is None:
-        return current_meta
-    md_dict = current_meta.copy()
-    for key, metadata_df in new_metadata_dict.items():
-
-        if key not in md_dict:
-            continue
-        
-        md= md_dict[key]
-        for _, row in metadata_df.iterrows():
-            name = row.get('name')
-            if name in md['name'].values:
-                idx = md.index[md['name'] == name][0]
-                for col in ['datatype', 'element', 'unit', 'method', 'description','element_uri']:
-                    current_value = md.at[idx, col]
-                    
-                    if overwrite == 'no_overwrite' and pd.notna(current_value) and current_value not in [None, ""]:
-                        continue
-                    if (overwrite == 'yes' and col in row and pd.notna(row[col]) and row[col] != "") or (overwrite == 'yes_incl_blanks'and col in row):
-                        value = row[col]
-                        if isinstance(value, dict):
-                            md.loc[idx, col] = str(value)  # Convert dict to string
-                        else:
-                            md.loc[idx, col] = value
-                        continue
-    return md_dict
 
 @st.cache_resource
 def read_context_file(contextfile) -> str:
@@ -408,13 +381,13 @@ def generate_descriptions_with_LLM(var_list: List[str], context: str, human_desc
 
     return variable_descriptions
 
-@st.cache_resource
+@st.cache_data
 def load_sentence_model(modelname="all-MiniLM-L6-v2"):
     with st.spinner(f"🔄 Loading embedding model '{modelname}'... This may take a few seconds."):
         model = SentenceTransformer(modelname)
     return model
 
-@st.cache_resource
+@st.cache_data
 def load_vocab_indexes(modelname="all-MiniLM-L6-v2"):
     """Load FAISS indexes and associated metadata."""
     with st.spinner(f"🔄 Loading FAISS indexes and vocabulary for '{modelname}'..."):
@@ -574,9 +547,9 @@ def sources_selector_ncols(unique_sources, key_prefix="src", n=4):
     # --- Buttons row
     c1, c2, c3 = st.columns([1, 1, 3])
     with c1:
-        select_all = st.button("Select all", use_container_width=True,icon="✅")
+        select_all = st.button("Select all", width='stretch',icon="✅")
     with c2:
-        deselect_all = st.button("Deselect all", use_container_width=True,icon="🟩")
+        deselect_all = st.button("Deselect all", width='stretch',icon="🟩")
 
     # Apply button actions by updating session_state for all checkbox keys
     if select_all:
@@ -720,6 +693,9 @@ else:
     if "vocab_row_selection_status" not in st.session_state:
         st.session_state["vocab_row_selection_status"] = {}
 
+    if "df_selection_keywords" not in st.session_state:
+        st.session_state["df_selection_keywords"] = {}
+
     if st.button("Find Vocabulary Terms In Thesaury"):
 
 
@@ -734,12 +710,12 @@ else:
                     k_nearest=50
                 )
             
-        st.session_state["vocab_oversized_matching_results"][key] = raw_result_listdict
-        st.session_state["vocab_row_selection"][key] = {}
-        for result in raw_result_listdict:
-            key_result = result.get('id')
-            st.session_state["vocab_row_selection"][key][key_result]=False
-        st.session_state["vocab_row_selection_status"][key]="initialised"
+            st.session_state["vocab_oversized_matching_results"][key] = raw_result_listdict
+            st.session_state["vocab_row_selection"][key] = {}
+            for result in raw_result_listdict:
+                key_result = result.get('id')
+                st.session_state["vocab_row_selection"][key][key_result]=False
+            st.session_state["vocab_row_selection_status"][key]="initialised"
 
         st.success("✅ Matching complete!")
 
@@ -792,9 +768,7 @@ else:
             for key_closest_filtered in keys_closest_filtered:
                 st.session_state["vocab_row_selection"][key][key_closest_filtered] = True
             st.session_state["vocab_row_selection_status"][key] = "first proces done"
-            #TODO: check if naming is good -> is this only first selction of needs to be updated after every selction?
-
-
+            
 
 
     if st.session_state["vocab_matching_results"]:
@@ -850,6 +824,8 @@ else:
                 # Process the selected rows
                 selected_rows = edited_df[edited_df["Selected"]].copy()
 
+                st.session_state["df_selection_keywords"][key] = selected_rows
+
                 # Drop duplicates while preserving original order of 'query'
                 unique_queries = edited_df["query"].drop_duplicates()
 
@@ -900,7 +876,7 @@ else:
     # Prep UoM section with Ansis links
     if st.session_state["vocab_oversized_matching_results"]:
         
-        vocab_csv = "data\partial_results.csv"
+        vocab_csv = r"data\partial_results.csv"
         df_vocabs = read_csv_with_sniffer(Path(vocab_csv))
         applicable_unit_map = df_vocabs.set_index("concept")["applicableUnit"].to_dict()
         quantity_kind_map   = df_vocabs.set_index("concept")["quantityKind"].to_dict()

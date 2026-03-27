@@ -9,6 +9,7 @@ from PyPDF2 import PdfReader
 import hashlib
 from openai import OpenAI
 import re
+import unicodedata
 
 from sklearn.preprocessing import normalize
 from tqdm import tqdm
@@ -18,6 +19,7 @@ from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_c
 from dataclasses import dataclass
 from urllib.parse import urlparse
 from io import BytesIO
+from util.metadata import apply_new_metadata_info
 
 
 from docx import Document
@@ -124,38 +126,6 @@ def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
     separator_uploaded = dialect_uploaded.delimiter
     df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
     return df
-
-
-def apply_new_metadata_info(new_metadata_dict: dict, current_meta:dict, overwrite = 'no_overwrite') -> dict:
-    # Function to apply new metadata info from metadata_df to current_meta
-
-    # metadata_df expected to contain 'name' column
-    if new_metadata_dict is None:
-        return current_meta
-    md_dict = current_meta.copy()
-    for key, metadata_df in new_metadata_dict.items():
-
-        if key not in md_dict:
-            continue
-        
-        md= md_dict[key]
-        for _, row in metadata_df.iterrows():
-            name = row.get('name')
-            if name in md['name'].values:
-                idx = md.index[md['name'] == name][0]
-                for col in ['datatype', 'element', 'unit', 'method', 'description','element_uri']:
-                    current_value = md.at[idx, col]
-                    
-                    if overwrite == 'no_overwrite' and pd.notna(current_value) and current_value not in [None, ""]:
-                        continue
-                    if (overwrite == 'yes' and col in row and pd.notna(row[col]) and row[col] != "") or (overwrite == 'yes_incl_blanks'and col in row):
-                        value = row[col]
-                        if isinstance(value, dict):
-                            md.loc[idx, col] = str(value)  # Convert dict to string
-                        else:
-                            md.loc[idx, col] = value
-                        continue
-    return md_dict
 
 
 def _norm_mime(m: Optional[str]) -> str:
@@ -265,7 +235,7 @@ def read_context_file(contextfile: "ContextFile") -> str:
         )
 
     # --- Markdown / plain text ---
-    elif suffix in {"md", "markdown"} or mime.startswith("text/") or mime == "application/octet-stream":
+    elif suffix in {"md", "markdown", "txt"} or mime.startswith("text/") or mime == "application/octet-stream":
         # Try utf-8 first; fallback to latin-1 if needed
         try:
             context_text = data.decode("utf-8")
@@ -367,6 +337,112 @@ def parse_openai_json(raw_text: str):
     # Parse
     return json.loads(json_str)
 
+
+def normalize_variable_name(name: str) -> str:
+    """Normalize variable names for resilient matching between UI headers and LLM keys."""
+    if name is None:
+        return ""
+
+    text = str(name)
+
+    # Canonical Unicode form first so visually similar forms are comparable.
+    text = unicodedata.normalize("NFKC", text)
+
+    # Remove invisible control/format chars that often sneak in via copy/paste.
+    text = re.sub(r"[\u200B-\u200F\u202A-\u202E\u2060\uFEFF\u00AD]", "", text)
+
+    # Harmonize whitespace-like characters.
+    text = text.replace("\u00A0", " ")
+    text = text.replace("\u202F", " ")
+
+    # Normalize common symbol variants.
+    char_map = str.maketrans({
+        "–": "-",
+        "—": "-",
+        "−": "-",
+        "‑": "-",
+        "／": "/",
+        "⁄": "/",
+        "µ": "u",
+        "μ": "u",
+        "º": "°",
+        "˚": "°",
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+    })
+    text = text.translate(char_map)
+
+    # Normalize superscript digits/signs often used in units.
+    superscript_map = str.maketrans({
+        "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4",
+        "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9",
+        "⁺": "+", "⁻": "-",
+    })
+    text = text.translate(superscript_map)
+
+    # Strip common list/bullet prefixes that models sometimes prepend to keys.
+    text = re.sub(r"^\s*(?:[-*•]|\d+[.)]|\(?[a-zA-Z]\))\s+", "", text)
+
+    # Remove wrappers and trailing punctuation noise around generated keys.
+    text = text.strip(" \t\n\r\"'`“”[]{}")
+    text = re.sub(r"[:;,.]+$", "", text)
+
+    # Normalize spacing around punctuation and operators.
+    text = re.sub(r"\s*\(\s*", " (", text)
+    text = re.sub(r"\s*\)\s*", ") ", text)
+    text = re.sub(r"\s*/\s*", "/", text)
+    text = re.sub(r"\s*\-\s*", "-", text)
+
+    # Final whitespace fold and case normalization.
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().lower()
+
+
+def align_llm_output_keys(
+                    parsed_response: Dict,
+                    expected_var_names: Optional[List[str]],
+                ) -> Dict:
+    """
+    Align LLM output keys with expected variable names.
+    Repairs common formatting drift (for example newline vs. space).
+    """
+    if not isinstance(parsed_response, dict) or not expected_var_names:
+        return parsed_response
+
+    expected_names = [str(name) for name in expected_var_names]
+    expected_exact = set(expected_names)
+
+    normalized_expected = {}
+    for expected in expected_names:
+        normalized_expected.setdefault(normalize_variable_name(expected), []).append(expected)
+
+    aligned = {}
+    used_expected = set()
+
+    for key, value in parsed_response.items():
+        llm_key = str(key)
+
+        if llm_key in expected_exact and llm_key not in used_expected:
+            aligned[llm_key] = value
+            used_expected.add(llm_key)
+            continue
+
+        norm_key = normalize_variable_name(llm_key)
+        candidates = normalized_expected.get(norm_key, [])
+        available = [candidate for candidate in candidates if candidate not in used_expected]
+
+        if len(available) == 1:
+            matched = available[0]
+            aligned[matched] = value
+            used_expected.add(matched)
+        else:
+            # Keep unknown or ambiguous keys untouched so no generated data is lost.
+            aligned[llm_key] = value
+
+    return aligned
+
 def get_response_OpenAI(prompt: str) -> str:
     client = st.session_state.get("openai_client")
 
@@ -437,15 +513,17 @@ def generate_descriptions_with_LLM(var_list: List[str],
                                    tablename:str) -> Dict[str, str]:
     
     process = 'descriptions'
+    expected_var_names = list(var_list)
+    prompt_var_list = list(var_list)
 
     if not human_description is None:
         # Use human descriptions as hints
-        var_list = [f"{var} (hint: {human_description.get(var, '')})" for var in var_list]
+        prompt_var_list = [f"{var} (hint: {human_description.get(var, '')})" for var in var_list]
     prompt = f"""
     You are given a list of variables from a CSV file and some contextual documentation. For some variables, a hint will be given.
     Context:\n{context[:40000]}
     
-    Variables: {var_list}
+    Variables: {prompt_var_list}
     
     
     Return a JSON object where each key is a variable name and each value is a concise, factual definition (1–2 sentences) derived from the context. Use neutral, scientific language that describes *what the variable represents* or *how it is measured*, without inferring purpose, function, or evaluation. If the context does not provide enough information, make an educated guess based only on naming conventions and scientific norms, while remaining neutral.
@@ -455,10 +533,11 @@ def generate_descriptions_with_LLM(var_list: List[str],
         prompt=prompt,
         process=process,
         context=context,
-        var_list=var_list,
+        var_list=prompt_var_list,
         provider_selected=provider_selected,
         cache_feedback=cache_feedback,
         tablename=tablename,
+        expected_var_names=expected_var_names,
     )
     return variable_descriptions
 
@@ -487,6 +566,7 @@ def generate_UoM_with_LLM(var_list: List[str],
         provider_selected=provider_selected,
         cache_feedback=cache_feedback,
         tablename=tablename,
+        expected_var_names=var_list,
     )
 
     return variable_UoM
@@ -539,6 +619,7 @@ def generate_methode_with_LLM(var_list: List[str],
         provider_selected=provider_selected,
         cache_feedback=cache_feedback,
         tablename=tablename,
+        expected_var_names=var_list,
     )
     return variable_descriptions
 
@@ -550,6 +631,7 @@ def from_prompt_to_json(
                         provider_selected: str,
                         cache_feedback, 
                         tablename: str,
+                        expected_var_names: Optional[List[str]] = None,
                     ) -> Dict:
 
     # Check cache before calling OpenAI
@@ -566,14 +648,10 @@ def from_prompt_to_json(
             #TODO; catch when no internet connection is made -> or any other bad call
             raw_output = callfunc(prompt)
         
-        #DEBUG statement
-        st.write(raw_output)
 
         store_result(context, var_list, raw_output,provider_selected, process)
         cache_feedback.success(f"✅ Saved new response to cache for {tablename}")
         
-        # st.subheader("Raw OpenAI Output")
-        # st.text_area("Raw Response", raw_output, height=300)
         
     if raw_output:
         st.session_state["raw_output"] = raw_output  # Save raw output        
@@ -581,6 +659,10 @@ def from_prompt_to_json(
         try:
 
             parsed_respons = parse_openai_json(raw_output)
+            parsed_respons = align_llm_output_keys(
+                parsed_response=parsed_respons,
+                expected_var_names=expected_var_names,
+            )
 
         except json.JSONDecodeError:
             st.info(raw_output)
@@ -734,7 +816,7 @@ st.title("📖 STEP 2 : Description of data")
 
 st.markdown("""
             Next step, describing the variables in humanly understandable language. This will nog only help yourself to document your data but also others who might use it in the future. And even our computers will understand the variables better when we will try to link them to vocabularies in the next step.  \n
-            You can add descriptions manually, or let an LLM help you out by providing some context files (e.g. a data dictionary, a manual, a scientific paper,...). The LLM will then try to extract relevant information from the context and generate concise descriptions for your variables.""")
+            You can add descriptions manually, or let an LLM help you out preventing double work by providing some context files you already have (e.g. a data dictionary, a manual, a scientific paper,...). The LLM will then try to extract relevant information from the context and generate concise descriptions and metadata for your variables.""")
 
 st.markdown(""" --- """)
 
@@ -855,7 +937,7 @@ else:
         st.markdown("**add some context files to start generation of descriptions with the help of an LLM**")
         upload_key = st.session_state.get("upload_key", 0)
         uploaded_contextfiles = st.file_uploader("Upload context files",
-                                                 type=['pdf','doc','docx','md'],
+                                                 type=['pdf','doc','docx','md','txt'],
                                                  key=f'context_upload_{upload_key}',
                                                  accept_multiple_files=True)
 
@@ -1007,6 +1089,7 @@ else:
                                                                     cache_feedback  = cache_box_Methode,
                                                                     tablename = key)
                     
+
                     description_df = pd.DataFrame(
                         list(AI_descriptions.items()), columns=["name", "description"]
                     )
@@ -1082,6 +1165,7 @@ else:
                     st.session_state[meta_key] = meta_dict_added
 
                     st.info("✅ Descriptions updated in main metadata table.")
+    
 
     st.divider()
 

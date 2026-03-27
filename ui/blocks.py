@@ -59,6 +59,8 @@ def add_clear_cache_button(key_prefix: str = "global"):
 
             # Clear session state safely
             st.session_state.clear()
+            
+            st.switch_page("pages/01_📖_Input.py")  # Redirect to the first page after clearing cache
 
             st.rerun()
 
