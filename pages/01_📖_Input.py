@@ -2,10 +2,14 @@ import streamlit as st
 import pandas as pd
 import io
 import json
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, List, Dict
 from types import SimpleNamespace
 import os
 import re
+import hashlib
+
+from csvwlib.utils.NumericUtils import NumericUtils
+from csvwlib.utils.datatypeutils import is_compatible_with_datatype
 
 import requests
 
@@ -28,8 +32,64 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 # -------------------- Helper data and functions --------------------
 
 # !! in UoM procedure, it's hardcoded filtered on "numeric"
-DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
+# https://www.w3.org/TR/tabular-data-primer/?ref=stevenfirth.com#datatypes
+DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
+                     'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
+                     'integer', 'long', 'int', 'short', 'byte',
+                     'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
+                     'unsignedInt', 'unsignedShort', 'unsignedByte',
+                     'nonPositiveInteger', 'negativeInteger', 'double',
+                     'number', 'duration', 'dayTimeDuration', 'yearMonthDuration',
+                     'float', 'gDay', 'gMonth', 'gMonthDay', 'gYear', 'gYearMonth',
+                     'hexBinary', 'QName', 'string', 'normalizedString', 'token',
+                     'language', 'Name', 'NMTOKEN', 'time', 'xml', 'html', 'json']
 
+SESSION_RESET_KEYS = [
+    "metadata_df",
+    "source_df_id",
+    "metadata_df_id",
+    "tabular_data_dict",
+    "filename_dict",
+    "uploaded_filename",
+    "zenodo_context_files_url",
+    "zenodo_context_metadata",
+    "zenodo_context_files_from_zip",
+    "primary_keys",
+    "context_files",
+    "vocab_oversized_matching_results",
+    "vocab_row_selection",
+    "vocab_row_selection_status",
+    "df_selection_keywords",
+
+]
+
+
+SESSION_RESET_PREFIXES = [
+    "editor_",
+    "discard_table_",
+    "move_to_context_",
+]
+
+
+def _clear_dependent_session_state_for_new_input():
+    for key in SESSION_RESET_KEYS:
+        st.session_state.pop(key, None)
+
+    for key in list(st.session_state.keys()):
+        if any(key.startswith(prefix) for prefix in SESSION_RESET_PREFIXES):
+            st.session_state.pop(key, None)
+
+    # # Keep non-table context files (e.g. user-provided docs) but remove stale table-derived context.
+    # if "context_files" in st.session_state:
+    #     st.session_state["context_files"] = [
+    #         f for f in st.session_state["context_files"]
+    #         if getattr(f, "source", None) != "table"
+    #     ]
+
+
+def _build_input_signature(mode: str, upload_tokens: list[str], url_input: str = "") -> str:
+    signature_raw = "|".join([mode, *(sorted(upload_tokens)), (url_input or "")])
+    return hashlib.sha256(signature_raw.encode("utf-8")).hexdigest()
 
 def filename_from_url(url: str) -> str:
     filename = urlparse(url).path.split('/')[-1]
@@ -38,45 +98,79 @@ def filename_from_url(url: str) -> str:
         filename=filename_from_url(url_strip)
     return filename
 
-def detect_column_type_from_series(s: pd.Series, sample_size: int = 200) -> str:
-    # sample values (non-null, up to sample_size)
+def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> str:
+    """Detect the most specific CSVW datatype for a pandas Series using csvwlib.
+
+    Probes each sampled value with csvwlib's NumericUtils.is_numeric (more robust
+    than float() — handles E notation, %, ‰) and is_compatible_with_datatype for
+    structural checks, then falls back to pandas for date/dateTime distinction.
+
+    Returns one of: 'integer', 'decimal', 'date', 'dateTime', 'time', 'boolean', 'string'.
+    """
     series = s.dropna().astype(str).str.strip()
     if len(series) == 0:
         return "string"
     series = series.head(sample_size)
 
-    numeric_count = 0
-    date_count = 0
+    counts = {"integer": 0, "decimal": 0, "dateTime": 0, "date": 0, "time": 0, "boolean": 0}
     total = 0
 
     for val in series:
         if val == "":
             continue
         total += 1
-        # allow comma as decimal marker as well
+
+        # --- numeric (csvwlib NumericUtils, supports E, %, ‰, +/-) ---
         v = val.replace(',', '.')
-        # numeric test (integers or floats)
-        try:
-            float(v)
-            numeric_count += 1
+
+        if NumericUtils.is_numeric(v):
+            try:
+                f = float(v)
+                if f == int(f):
+                    counts["integer"] += 1
+                else:
+                    counts["decimal"] += 1
+            except (ValueError, OverflowError):
+                counts["decimal"] += 1
             continue
-        except Exception:
-            pass
-        # date test: try parse
-        try:
-            # heuristic: require separators or obvious ISO formats
-            if any(sep in val for sep in ['/', '-', '.']) or val.isdigit():
-                pd.to_datetime(val)
-                date_count += 1
-        except Exception:
-            pass
+
+        # --- boolean (csvwlib is_compatible_with_datatype) ---
+        if is_compatible_with_datatype(val, "boolean"):
+            # only treat as boolean if the value is literally true/false/1/0
+            if val.lower() in ("true", "false", "1", "0"):
+                counts["boolean"] += 1
+                continue
+
+        # --- date / dateTime / time via pandas (csvwlib delegates to dateutil anyway) ---
+        if any(sep in val for sep in ['/', '-', '.', ':']):
+            try:
+                parsed = pd.to_datetime(val)
+                # distinguish dateTime (has non-midnight time) from plain date
+                if parsed.hour != 0 or parsed.minute != 0 or parsed.second != 0:
+                    counts["dateTime"] += 1
+                else:
+                    counts["date"] += 1
+                continue
+            except Exception:
+                pass
+            # time-only strings  e.g. "14:30:00"
+            try:
+                pd.to_datetime(val, format="%H:%M:%S")
+                counts["time"] += 1
+                continue
+            except Exception:
+                pass
 
     if total == 0:
         return "string"
-    if numeric_count / total >= 0.8:
-        return "numeric"
-    if date_count / total >= 0.8:
-        return "date"
+
+    THRESHOLD = 0.8
+    # Order: most specific / least ambiguous first
+    for dt in ("integer", "decimal", "boolean", "dateTime", "date", "time"):
+        if counts[dt] / total >= THRESHOLD:
+            if dt == "integer" and counts["decimal"] > 0:
+                return "decimal"
+            return dt
     return "string"
 
 
@@ -143,11 +237,16 @@ def detect_date_format_from_series(s: pd.Series, sample_size: int = 200) -> str:
     return best_fmt if best_count / valid_total >= 0.6 else ""
 
 
-def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
+def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
+    df = df_origin.copy()
     cols = []
     for c in df.columns:
-        dtype = detect_column_type_from_series(df[c])
-        date_format = detect_date_format_from_series(df[c]) if dtype == "date" else ""
+
+        
+        
+        dtype = detect_csvw_datatype_from_series(df[c])
+
+        date_format = detect_date_format_from_series(df[c]) if dtype in ("date", "dateTime", "time") else ""
         cols.append({
             "name": c,
             "datatype": dtype,
@@ -158,6 +257,7 @@ def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
             "description": "",
             "element_uri": ""
         })
+
     return pd.DataFrame(cols)
 
 @st.cache_data()
@@ -428,6 +528,50 @@ def process_zip_from_url(file_url: str, tabular_dict: dict, context_files: list,
                 "member_path": info.filename,
                 "bytes": raw,
             })
+            
+# pick primary key candidate from rows (list of dicts)
+def pick_primary_key(headers: List[str], rows_sample: List[Dict[str,Any]]) -> Optional[str]:
+    # compute unique ratio per header
+    scores = []
+    for h in headers:
+        non_empty = 0
+        seen = set()
+        for r in rows_sample:
+            v = r.get(h, "")
+            s = "" if v is None else str(v).strip()
+            if s == "":
+                continue
+            non_empty += 1
+            seen.add(s)
+        if non_empty == 0:
+            uniq_ratio = 0.0
+        else:
+            uniq_ratio = len(seen) / non_empty
+        scores.append((h, non_empty, len(seen), uniq_ratio))
+
+    # prefer name hints
+    hints = ['id', 'identifier', 'uuid', 'code', 'key']
+    strong = [s for s in scores if s[1] >= 3 and s[3] >= 0.98]
+    good = [s for s in scores if s[1] >= 3 and s[3] >= 0.8]
+    perfect = [s for s in scores if s[1] >= 3 and s[2] == s[1]]
+
+    def pick_by_hint(cands):
+        for hint in hints:
+            for c in cands:
+                if hint in c[0].lower():
+                    return c[0]
+        return None
+    
+    if perfect:
+        return pick_by_hint(perfect) or perfect[0][0]
+    if len(strong) == 1:
+        return strong[0][0]
+    if len(strong) > 1:
+        return pick_by_hint(strong) or sorted(strong, key=lambda x: -x[3])[0][0]
+    if good:
+        return pick_by_hint(good) or sorted(good, key=lambda x: -x[3])[0][0]
+
+    return None
 
 # -------------------- UI --------------------
 st.title("📖 STEP 1 : input of information")
@@ -465,6 +609,8 @@ col1, col2 = st.columns([1, 1])
 tabular_dict = dict()
 zipped_context_files = []
 filename_dict = dict()  # to keep track of original filenames for tabular data
+upload_tokens: list[str] = []
+url_input = ""
 
 
 with col1:
@@ -473,6 +619,7 @@ with col1:
         uploaded = st.file_uploader("Upload CSV file", type=['csv'], key='single_upload')
         filename = uploaded.name if uploaded else None
         if uploaded:
+            upload_tokens.append(f"csv:{uploaded.name}:{uploaded.size}")
             try:
                 raw = uploaded.getvalue()
                 uploaded_df = read_csvBytes_with_sniffer(raw)
@@ -486,6 +633,7 @@ with col1:
         obs_file = st.file_uploader("Upload Observations CSV", type=['csv'], key='obs_upload')
         filename = obs_file.name if obs_file else None
         if site_file:
+            upload_tokens.append(f"csv:{site_file.name}:{site_file.size}")
             try:
                 raw = site_file.getvalue()
                 site_df = read_csvBytes_with_sniffer(raw)
@@ -493,6 +641,7 @@ with col1:
             except Exception as e:
                 st.error(f"Failed to read sites CSV: {e}")
         if obs_file:
+            upload_tokens.append(f"csv:{obs_file.name}:{obs_file.size}")
             try:
                 raw = obs_file.getvalue()
                 obs_df = read_csvBytes_with_sniffer(raw)
@@ -505,6 +654,7 @@ with col1:
         filename = excel_file.name if excel_file else None
         selected_sheet = None
         if excel_file:
+            upload_tokens.append(f"excel:{excel_file.name}:{excel_file.size}")
             try:
                 df_dict = get_excel(excel_file)
                 for sheet_name, df in df_dict.items():
@@ -513,7 +663,7 @@ with col1:
             except Exception as e:
                 st.error(f"Failed to read Excel: {e}")
     elif mode == 'url - zenodo':
-        url_input = st.text_input("Enter URL to zenodo records. (prefered format 'https://zenodo.org/records/{ID_number}')", key='url_input',value="https://zenodo.org/records/8083652")
+        url_input = st.text_input("Enter URL to zenodo records. (prefered format 'https://zenodo.org/records/{ID_number}')", key='url_input')
         
         if url_input:
             # PIN : Zenodo Test URLS
@@ -524,6 +674,7 @@ with col1:
             # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
             #######################################################
             record_id = get_record_id_from_Zenodo_url(url_input)
+            upload_tokens.append(f"zenodo:{record_id}")
             
 
 
@@ -583,6 +734,12 @@ with col1:
         st.session_state.pop("zenodo_context_files_url", None)
         st.session_state.pop("zenodo_context_metadata", None)
 
+current_input_signature = _build_input_signature(mode, upload_tokens, url_input)
+previous_input_signature = st.session_state.get("_input_signature")
+if previous_input_signature is not None and previous_input_signature != current_input_signature:
+    _clear_dependent_session_state_for_new_input()
+st.session_state["_input_signature"] = current_input_signature
+
 
 
 with col2:
@@ -610,7 +767,8 @@ if mode == 'linked' and site_df is not None and obs_df is not None:
             st.error(f"Failed to merge tables: {e}")
 
 meta_key = f"metadata_df"
-st.session_state[meta_key] = tabular_dict
+if meta_key not in st.session_state or not isinstance(st.session_state.get(meta_key), dict):
+    st.session_state[meta_key] = {}
 
 
 
@@ -660,9 +818,13 @@ if tabular_dict:
     tables_to_context = set()
     if "context_files" not in st.session_state:
         st.session_state["context_files"] = []
+    if "primary_keys" not in st.session_state:
+        st.session_state["primary_keys"] = {}
+    if "primary_keys_guess" not in st.session_state:
+        st.session_state["primary_keys_guess"] = {}
 
     for tab, key in zip(tabs, tab_labels):
-        df = tabular_dict[key]
+        df = tabular_dict[key].copy()
 
         with tab:
 
@@ -702,6 +864,8 @@ if tabular_dict:
                 ]
                 st.info("This table will be excluded from metadata and downstream tabular processing.")
                 continue
+            
+            
 
             if move_to_context:
                 tables_to_context.add(key)
@@ -718,6 +882,8 @@ if tabular_dict:
                     )
                 ]
             
+            
+
             try:
                 st.dataframe(df.head(5))
             except Exception as e:
@@ -735,19 +901,36 @@ if tabular_dict:
                 st.error(f"Error displaying dataframe: {e}")
                 continue
 
-            source_id = id(df)
             meta_key = f"metadata_df"
-            source_id_key = f"source_df_id"
             if meta_key not in st.session_state:
                 st.session_state[meta_key] = {}
 
-        
-            if (meta_key not in st.session_state or st.session_state.get(source_id_key) != source_id):
+
+            if key not in st.session_state[meta_key]:
                 st.session_state[meta_key][key] = build_metadata_df_from_df(df)
-                st.session_state[source_id_key] = source_id
+
+            primary_keys_guess= pick_primary_key(df.columns.tolist(), df.head(200).to_dict(orient='records'))
+            st.session_state["primary_keys_guess"][key] = primary_keys_guess
+            st.session_state["primary_keys"][key]=st.selectbox(
+                "Select primary key column (if applicable)",
+                options=[''] + df.columns.tolist(),
+                index=0 if primary_keys_guess is None else df.columns.get_loc(primary_keys_guess) + 1,
+                key=f"primary_key_select_{key}",
+                width=200,
+            )
+            
+            # Add primary key to metadata dataframe
+            primary_key_col = st.session_state["primary_keys"][key]
+            if primary_key_col:  # Only if a primary key was selected
+                if "primary key" not in st.session_state[meta_key][key].columns:
+                    st.session_state[meta_key][key]["primary key"] = False
+                st.session_state[meta_key][key]["primary key"] = st.session_state[meta_key][key]['name']== primary_key_col
+            else:
+                st.session_state[meta_key][key]["primary key"] = False
 
             st.markdown("#### Metadata")
             st.caption("Change the datatype and date format as needed.")
+
             original_metadata_df = st.session_state[meta_key][key]
             all_columns = original_metadata_df.columns.tolist()
             edited_df = st.data_editor(
@@ -760,7 +943,9 @@ if tabular_dict:
                                     options=DATA_TYPE_OPTIONS,
                                 ),
                             },
+                            
                         )
+
             if not edited_df.equals(original_metadata_df):
                     # update the selected items
                     st.session_state[meta_key] = apply_new_metadata_info(
@@ -769,6 +954,8 @@ if tabular_dict:
                                                     overwrite='yes_incl_blanks'
                                                     )
                     st.rerun()               
+
+
 
     context_tables_added = 0
     if tables_to_context:
@@ -821,6 +1008,8 @@ if tabular_dict:
 
 
     st.session_state["tabular_data_dict"] = {key: df.copy() for key, df in tabular_dict.items()}
+    
+
 
     if "filename_dict" not in st.session_state:
             st.session_state["filename_dict"] = {}
