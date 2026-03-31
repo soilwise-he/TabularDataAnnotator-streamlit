@@ -33,68 +33,11 @@ meta_key = f"metadata_df"
 
 # -------------------- Helper data and functions --------------------
 
-DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
-
 
 #BUG: General bug "Sourcefile" still in sourcelist of the vocab list !!!
 
 
-def detect_column_type_from_series(s: pd.Series, sample_size: int = 200) -> str:
-    # sample values (non-null, up to sample_size)
-    series = s.dropna().astype(str).str.strip()
-    if len(series) == 0:
-        return "string"
-    series = series.head(sample_size)
 
-    numeric_count = 0
-    date_count = 0
-    total = 0
-
-    for val in series:
-        if val == "":
-            continue
-        total += 1
-        # allow comma as decimal marker as well
-        v = val.replace(',', '.')
-        # numeric test (integers or floats)
-        try:
-            float(v)
-            numeric_count += 1
-            continue
-        except Exception:
-            pass
-        # date test: try parse
-        try:
-            # heuristic: require separators or obvious ISO formats
-            if any(sep in val for sep in ['/', '-', '.']) or val.isdigit():
-                pd.to_datetime(val)
-                date_count += 1
-        except Exception:
-            pass
-
-    if total == 0:
-        return "string"
-    if numeric_count / total >= 0.8:
-        return "numeric"
-    if date_count / total >= 0.8:
-        return "date"
-    return "string"
-
-
-def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
-    cols = []
-    for c in df.columns:
-        dtype = detect_column_type_from_series(df[c])
-        cols.append({
-            "name": c,
-            "datatype": dtype,
-            "element": "",
-            "unit": "",
-            "method": "",
-            "description": "",
-            "element_uri": ""
-        })
-    return pd.DataFrame(cols)
 
 def _read_bytes(source: Union[Path, str, "st.runtime.uploaded_file_manager.UploadedFile"]) -> bytes:
     if hasattr(source, "getvalue"):          # UploadedFile
