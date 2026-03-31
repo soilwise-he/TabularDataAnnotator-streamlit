@@ -43,7 +43,16 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 # -------------------- Helper data and functions --------------------
 
-DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
+DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
+                     'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
+                     'integer', 'long', 'int', 'short', 'byte',
+                     'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
+                     'unsignedInt', 'unsignedShort', 'unsignedByte',
+                     'nonPositiveInteger', 'negativeInteger', 'double',
+                     'number', 'duration', 'dayTimeDuration', 'yearMonthDuration',
+                     'float', 'gDay', 'gMonth', 'gMonthDay', 'gYear', 'gYearMonth',
+                     'hexBinary', 'QName', 'string', 'normalizedString', 'token',
+                     'language', 'Name', 'NMTOKEN', 'time', 'xml', 'html', 'json']
 
 
 @dataclass
@@ -55,62 +64,7 @@ class ContextFile:
     ext:str
 
 
-def detect_column_type_from_series(s: pd.Series, sample_size: int = 200) -> str:
-    # sample values (non-null, up to sample_size)
-    series = s.dropna().astype(str).str.strip()
-    if len(series) == 0:
-        return "string"
-    series = series.head(sample_size)
 
-    numeric_count = 0
-    date_count = 0
-    total = 0
-
-    for val in series:
-        if val == "":
-            continue
-        total += 1
-        # allow comma as decimal marker as well
-        v = val.replace(',', '.')
-        # numeric test (integers or floats)
-        try:
-            float(v)
-            numeric_count += 1
-            continue
-        except Exception:
-            pass
-        # date test: try parse
-        try:
-            # heuristic: require separators or obvious ISO formats
-            if any(sep in val for sep in ['/', '-', '.']) or val.isdigit():
-                pd.to_datetime(val)
-                date_count += 1
-        except Exception:
-            pass
-
-    if total == 0:
-        return "string"
-    if numeric_count / total >= 0.8:
-        return "numeric"
-    if date_count / total >= 0.8:
-        return "date"
-    return "string"
-
-
-def build_metadata_df_from_df(df: pd.DataFrame) -> pd.DataFrame:
-    cols = []
-    for c in df.columns:
-        dtype = detect_column_type_from_series(df[c])
-        cols.append({
-            "name": c,
-            "datatype": dtype,
-            "element": "",
-            "unit": "",
-            "method": "",
-            "description": "",
-            "element_uri": ""
-        })
-    return pd.DataFrame(cols)
 
 @st.cache_resource()
 def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
