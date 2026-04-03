@@ -5,15 +5,9 @@ import json
 from datetime import datetime
 from typing import List, Dict
 import os
-from PyPDF2 import PdfReader
-import docx
 import hashlib
-from openai import OpenAI
 import re
-from sentence_transformers import SentenceTransformer
-import faiss
 import numpy as np
-from sklearn.preprocessing import normalize
 from tqdm import tqdm
 import requests
 import ast
@@ -120,30 +114,13 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
         return None
 
 
-@st.cache_resource
-def read_context_file(contextfile) -> str:
-    context_text=""
-    if contextfile.type == "application/pdf":
-        reader = PdfReader(contextfile)
-        for page in reader.pages:
-            context_text += page.extract_text() + "\n"
-    elif contextfile.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        doc = docx.Document(contextfile)
-        for para in doc.paragraphs:
-            context_text += para.text + "\n"
-    return context_text
+
 
 def download_bytes(content: bytes, filename: str, mime: str = 'application/octet-stream'):
     st.download_button(label=f"Download {filename}", data=content, file_name=filename, mime=mime)
 
 CACHE_FILE = "data/openai_cache.json"
 
-# Init OpenAI client
-def create_openai_client(api_key: str):
-    """Create an OpenAI client from an API key (returns None if no key)."""
-    if not api_key:
-       return None
-    return OpenAI(api_key=api_key)
 
 
 # Init Apertus client
@@ -327,6 +304,7 @@ def generate_descriptions_with_LLM(var_list: List[str], context: str, human_desc
 @st.cache_data
 def load_sentence_model(modelname="all-MiniLM-L6-v2"):
     with st.spinner(f"🔄 Loading embedding model '{modelname}'... This may take a few seconds."):
+        from sentence_transformers import SentenceTransformer # Heavy loader
         model = SentenceTransformer(modelname)
     return model
 
@@ -334,7 +312,8 @@ def load_sentence_model(modelname="all-MiniLM-L6-v2"):
 def load_vocab_indexes(modelname="all-MiniLM-L6-v2"):
     """Load FAISS indexes and associated metadata."""
     with st.spinner(f"🔄 Loading FAISS indexes and vocabulary for '{modelname}'..."):
-        
+        import faiss # Heavy loader
+
         # Loading in FAISS indexes of preprocessed vocab embeddings
         index_lib = faiss.read_index(f"data/vocabCombined-{modelname.replace('/','--')}.index")
 
@@ -361,7 +340,6 @@ def load_vocab_indexes(modelname="all-MiniLM-L6-v2"):
     return index_lib, meta_data_dict
 
 def embed_vocab(word, definition=None, alpha=0.4):
-
     """
         Generates a semantic embedding for a given word, optionally influenced by its definition.
 
@@ -383,7 +361,8 @@ def embed_vocab(word, definition=None, alpha=0.4):
         np.ndarray
             A normalized vector representing the blended embedding.
     """
-
+    from sklearn.preprocessing import normalize # Heavy loader
+    
     # encode separately
     emb_word = model.encode(word, normalize_embeddings=True)
     
@@ -398,6 +377,7 @@ def embed_vocab(word, definition=None, alpha=0.4):
     
     # weighted combination
     vec = alpha * emb_word + (1 - alpha) * emb_def
+    
     vec = normalize(vec.reshape(1, -1)).squeeze()
     return alpha * emb_word + (1 - alpha) * emb_def
 
@@ -701,7 +681,8 @@ else:
                     reverse=False
                 )
                 keys_closest_filtered.append(hits_sorted[0]["id"])
-                final_results.extend(hits_sorted[:4])
+                k_nearest_visualised = 5
+                final_results.extend(hits_sorted[:k_nearest_visualised])
 
 
             st.session_state["vocab_matching_results"][key] = final_results
@@ -720,7 +701,7 @@ else:
         tabs_matching = st.tabs(tab_labels_matching)
 
         st.divider()
-        for tab, key in zip(tabs_matching, tab_labels_matching):
+        for tab_idx, (tab, key) in enumerate(zip(tabs_matching, tab_labels_matching), start=1):
             with tab:
                 vocab_match_dict = st.session_state["vocab_matching_results"][key]
                 result_df = pd.DataFrame(vocab_match_dict)
@@ -747,30 +728,40 @@ else:
                 new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
                 new_order.remove("id")
 
-                #BUG: every edit everything jumps. Probably because of rerun and new styled_df?
-                edited_df = st.data_editor(
-                    styled_df,
-                    disabled =disabling_columns,
-                    column_order = new_order,
-                    num_rows="dynamic",
-                    width='stretch',
-                    key=f"editable_vocab_df_{key}",
-                    hide_index=True
-                )
+                # Use a form so multiple checkbox edits are applied in one go.
+                with st.form(key=f"vocab_form_{key}", clear_on_submit=False):
+                    edited_df = st.data_editor(
+                        styled_df,
+                        disabled=disabling_columns,
+                        column_order=new_order,
+                        num_rows="dynamic",
+                        width='stretch',
+                        key=f"editable_vocab_df_{key}",
+                        hide_index=True
+                    )
 
-                if not edited_df.equals(styled_df):
-                    # update the selected items
-                    for _, row in edited_df.iterrows():
-                        st.session_state["vocab_row_selection"][key][row["id"]] = row["Selected"]
-                    st.rerun()
+                    apply_selection_changes = st.form_submit_button(
+                        f"Apply changes - table {tab_idx}",
+                        type="primary",
+                    )
 
-                # Process the selected rows
-                selected_rows = edited_df[edited_df["Selected"]].copy()
+
+                if apply_selection_changes:
+                    # Persist all current checkbox states at once.
+                    for _, row in edited_df[["id", "Selected"]].iterrows():
+                        st.session_state["vocab_row_selection"][key][row["id"]] = bool(row["Selected"])
+
+                # Process selected rows from session state (stable across reruns).
+                selected_rows = result_df[
+                    result_df["id"].map(
+                        lambda rid: st.session_state["vocab_row_selection"][key].get(rid, False)
+                    )
+                ].copy()
 
                 st.session_state["df_selection_keywords"][key] = selected_rows
 
                 # Drop duplicates while preserving original order of 'query'
-                unique_queries = edited_df["query"].drop_duplicates()
+                unique_queries = result_df["query"].drop_duplicates()
 
                 if not selected_rows.empty:
                     st.markdown("##### -> Selected Rows")
