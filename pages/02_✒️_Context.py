@@ -157,7 +157,6 @@ def read_context_file(contextfile: "ContextFile") -> str:
         context_text = "\n\n".join([p for p in parts if p])
 
     # --- DOCX ---
-    #BUG: ignores tables in files!! Test with zenodo; https://zenodo.org/records/17305831
     elif (
         mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         or suffix == "docx"
@@ -599,8 +598,18 @@ def from_prompt_to_json(
         with st.spinner(f"🪶 The gnomes are working in colaboration with {provider_selected}..."):
             callfunc = LLM_selection_info.get(provider_selected, {}).get("callfunction")
 
-            #TODO; catch when no internet connection is made -> or any other bad call
-            raw_output = callfunc(prompt)
+            if callfunc is None:
+                st.error(f"No call function configured for provider '{provider_selected}'.")
+                return {}
+
+            try:
+                raw_output = callfunc(prompt)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                st.error(f"🔌 Network error while contacting {provider_selected}: {e}")
+                return {}
+            except Exception as e:
+                st.error(f"❌ Error calling {provider_selected}: {e}")
+                return {}
         
 
         store_result(context, var_list, raw_output,provider_selected, process)
