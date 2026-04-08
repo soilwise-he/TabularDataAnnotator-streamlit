@@ -17,7 +17,11 @@ def _merge_metadata_rows(
             continue
 
         idx = md.index[md["name"] == name][0]
-        for col in ["datatype","date format", "element", "unit", "method", "description", "element_uri"]:
+        for col in ["datatype","dateTime format", "element", "unit", "method", "description", "element_uri", "conversionMultiplier", "conversionOffset"]:
+            # Ensure column exists in the target DataFrame before writing.
+            if col not in md.columns:
+                md[col] = None
+
             current_value = md.at[idx, col]
             if overwrite == "no_overwrite" and pd.notna(current_value) and current_value not in [None, ""]:
                 continue
