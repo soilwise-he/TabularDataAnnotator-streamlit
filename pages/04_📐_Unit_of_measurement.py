@@ -23,7 +23,26 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 add_Soilwise_logo()
 add_clear_cache_button(key_prefix="Keyword_Matcher")
 
-DATA_TYPE_OPTIONS = ["string", "numeric", "date"]
+
+DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
+                     'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
+                     'integer', 'integer', 'long', 'int', 'short', 'byte',
+                     'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
+                     'unsignedInt', 'unsignedShort', 'unsignedByte',
+                     'nonPositiveInteger', 'negativeInteger', 'double',
+                     'number', 'duration', 'dayTimeDuration', 'yearMonthDuration',
+                     'float', 'gDay', 'gMonth', 'gMonthDay', 'gYear', 'gYearMonth',
+                     'hexBinary', 'QName', 'string', 'normalizedString', 'token',
+                     'language', 'Name', 'NMTOKEN', 'time', 'xml', 'html', 'json']
+
+# CSVW types for which a unit of measurement is meaningful.
+DATA_TYPE_OPTIONS_UoM = [
+    'decimal', 'integer', 'long', 'int', 'short', 'byte',
+    'nonNegativeInteger', 'positiveInteger',
+    'unsignedLong', 'unsignedInt', 'unsignedShort', 'unsignedByte',
+    'nonPositiveInteger', 'negativeInteger',
+    'double', 'float', 'number',
+]
 
 meta_key = f"metadata_df"
 
@@ -39,6 +58,7 @@ def load_qudt_data():
     
     df = pd.read_csv(qudt_path, low_memory=False)
     df = df[df['labelLang'] == 'en']
+    
 
     # strip latex formatting from descriptions for better searchability
     if "description" in df.columns:
@@ -85,6 +105,7 @@ def load_qudt_data():
     else:
         df = df.drop_duplicates(subset=duplicate_keys, keep="first")
 
+
     return df
 
 
@@ -95,17 +116,26 @@ def search_units(qudt_df: pd.DataFrame, search_term: str, search_type: str = "bo
     
     search_lower = search_term.lower()
     mask = pd.Series(False, index=qudt_df.index)
+    lookup = build_qudt_lookup(qudt_df)
     
     if search_type in ["unit", "both"]:
         mask |= qudt_df["label"].fillna("").str.lower().str.contains(search_lower, regex=False)
         mask |= qudt_df["symbol"].fillna("").str.lower().str.contains(search_lower, regex=False)
         mask |= qudt_df["description"].fillna("").str.lower().str.contains(search_lower, regex=False)
         mask |= qudt_df["ucumCode"].fillna("").str.lower().str.contains(search_lower, regex=False)
-    
+        search_lower_normalized = _normalize_qudt_text(search_lower)
+        if search_lower_normalized in lookup["unit"]:
+            matched_uris = lookup["unit"][search_lower_normalized]
+            mask |= qudt_df["unit"].isin(matched_uris)
+
+
     if search_type in ["quantitykind", "both"]:
         mask |= qudt_df["QuantityKind"].fillna("").str.lower().str.contains(search_lower, regex=False)
         mask |= qudt_df["QuantityKindDescription"].fillna("").str.lower().str.contains(search_lower, regex=False)
-    
+        if search_lower_normalized in lookup["quantitykind"]:
+            matched_uris = lookup["quantitykind"][search_lower_normalized]
+            mask |= qudt_df["QuantityKind"].isin(matched_uris)
+
     results = qudt_df[mask].copy()
     results = results.drop_duplicates(subset=["unit","QuantityKind"], keep="first")
     return results.sort_values("label")
@@ -302,13 +332,15 @@ def _normalize_qudt_text(value: str) -> str:
     # Use token-aware replacements of known aliases.
     alias_patterns = {
         r"\b(?:yr|yrs|year|years)\b": "a",
+        "²": "2",
+        "³": "3",
     }
     for pattern, replacement in alias_patterns.items():
         normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
 
-    for character in ["-1","-", "_", "/", "(", ")", "[", "]", ".", ",", "·"]:
-        normalized = normalized.replace(character, " ")
-    return " ".join(normalized.split())
+    for character in ["-1","-", "_", "/", "(", ")", "[", "]", ".", ",", "·","^"," "]:
+        normalized = normalized.replace(character, "")
+    return "".join(normalized.split())
 
 
 def _coerce_to_list(value):
@@ -357,7 +389,7 @@ def build_qudt_lookup(qudt_reference: pd.DataFrame) -> Dict[str, Dict[str, List[
                 unit_lookup.setdefault(key, [])
                 if unit_uri not in unit_lookup[key]:
                     unit_lookup[key].append(unit_uri)
-
+                    
         if pd.notna(kind_uri):
             for candidate in [
                 kind_uri,
@@ -370,6 +402,7 @@ def build_qudt_lookup(qudt_reference: pd.DataFrame) -> Dict[str, Dict[str, List[
                 kind_lookup.setdefault(key, [])
                 if kind_uri not in kind_lookup[key]:
                     kind_lookup[key].append(kind_uri)
+
 
     return {"unit": unit_lookup, "kind": kind_lookup}
 
@@ -402,7 +435,7 @@ def resolve_quantity_kind_uri(kind_value, qudt_reference: pd.DataFrame, lookup: 
     return resolved
 
 
-def resolve_unit_uri(unit_value,
+def resolve_unit_string_to_uri(unit_value,
                     kind_value,
                     qudt_reference: pd.DataFrame,
                     lookup: Dict[str, Dict[str, List[str]]]
@@ -483,10 +516,43 @@ def resolve_unit_uri(unit_value,
     return resolved_units
 
 
+def _append_unit_kinds_to_kind_value(
+    current_kind_value,
+    resolved_unit_value,
+    unit_to_kinds: Dict[str, List[str]],
+):
+    """Append inferred QuantityKind values from resolved units to the current kind value."""
+    existing_kinds = [
+        kind
+        for kind in _coerce_to_list(current_kind_value)
+        if isinstance(kind, str) and kind.startswith("http://qudt.org/vocab/quantitykind/")
+    ]
+
+    inferred_kinds: List[str] = []
+    for unit_uri in _coerce_to_list(resolved_unit_value):
+        if not isinstance(unit_uri, str):
+            continue
+        inferred_kinds.extend(unit_to_kinds.get(unit_uri, []))
+    inferred_kinds = [] if len(inferred_kinds) > 2 else inferred_kinds  # Heuristic to avoid adding too many inferred kinds in case of very generic units.
+    
+    merged = list(dict.fromkeys(existing_kinds + inferred_kinds))
+    if not merged:
+        return None
+    if len(merged) == 1:
+        return merged[0]
+    return merged
+
+
 def translate_QUDT(df: pd.DataFrame, qudt_reference: pd.DataFrame) -> pd.DataFrame:
     translated_df = df.copy()
     lookup = build_qudt_lookup(qudt_reference)
     columns = translated_df.columns.tolist()
+    unit_to_kinds = (
+        qudt_reference.dropna(subset=["unit", "QuantityKind"])
+        .groupby("unit")["QuantityKind"]
+        .agg(lambda series: list(dict.fromkeys(series.tolist())))
+        .to_dict()
+    )
 
     for column in columns:
         if column == "Variable":
@@ -501,16 +567,41 @@ def translate_QUDT(df: pd.DataFrame, qudt_reference: pd.DataFrame) -> pd.DataFra
     for column in columns:
         if "UoM" in column and not "Kind" in column:
             kind_column = _kind_column_for(column, columns)
-            
-            translated_df[column] = translated_df.apply(
-                lambda row: resolve_unit_uri(
-                    row[column],
-                    row[kind_column] if kind_column else None,
-                    qudt_reference,
-                    lookup,
-                ),
-                axis=1,
-            )
+
+            if kind_column:
+                def _resolve_and_enrich_row(row):
+                    resolved_units = resolve_unit_string_to_uri(
+                        row[column],
+                        row[kind_column],
+                        qudt_reference,
+                        lookup,
+                    )
+                    enriched_kinds = _append_unit_kinds_to_kind_value(
+                        row[kind_column],
+                        resolved_units,
+                        unit_to_kinds,
+                    )
+                    return pd.Series(
+                        {
+                            column: resolved_units,
+                            kind_column: enriched_kinds,
+                        }
+                    )
+
+                translated_df[[column, kind_column]] = translated_df.apply(
+                    _resolve_and_enrich_row,
+                    axis=1,
+                )
+            else:
+                translated_df[column] = translated_df.apply(
+                    lambda row: resolve_unit_string_to_uri(
+                        row[column],
+                        None,
+                        qudt_reference,
+                        lookup,
+                    ),
+                    axis=1,
+                )
 
     # Consistency healing for Arrow compatibility:
     # if a column mixes strings and lists, promote strings to one-item lists.
@@ -553,6 +644,8 @@ if "uom_selections" not in st.session_state:
     st.session_state["uom_selections"] = {}
 if "suggestion_pending" not in st.session_state:
     st.session_state["suggestion_pending"] = {}
+if "uom_manual_conversion" not in st.session_state:
+    st.session_state["uom_manual_conversion"] = {}
 
 
 st.markdown("#### 🔍 Search & Select Units from QUDT")
@@ -579,9 +672,9 @@ for tab, key in zip(tabs, tab_labels):
 
         # st.divider()
         
-        # Get numeric columns
+        # Get numeric columns (CSVW types for which a UoM is meaningful)
         meta_df = st.session_state[meta_key][key]
-        numeric_cols = meta_df[meta_df["datatype"] == "numeric"]
+        numeric_cols = meta_df[meta_df["datatype"].isin(DATA_TYPE_OPTIONS_UoM)]
         
         if numeric_cols.empty:
             st.info(f"ℹ️ No numeric variables found in **{key}**. Only numeric variables require unit annotations.")
@@ -636,16 +729,9 @@ for tab, key in zip(tabs, tab_labels):
 
         else:
             guesses_qudt_df = pd.DataFrame()
+ 
 
-        ######
-        #[x]TODO: make informed guess for UoM
-        #[x]TODO: Make find a way to use this background information of guesses to pre-populate search results in the next section
-        #[x]TODO: Make the search function hierarchical by first searching for quantity kind and then filtering units based on that
-        #[x]TODO: find a sorting methode of the search results -> SI units first, then multiplier factor 1 -> (abs(log(mulplier))), then alphabetically?
-        ######        
-        
-      
-        
+
         kind_catalog = get_quantity_kind_catalog(qudt_df)
         kind_uri_to_display = dict(zip(kind_catalog["QuantityKind"], kind_catalog["display"]))
         display_to_uri = {v: k for k, v in kind_uri_to_display.items()}
@@ -744,8 +830,58 @@ for tab, key in zip(tabs, tab_labels):
                     else:
                             st.warning("⚠️ No matching units found. Try a different search term. Or deselect quantity kind filters to broaden the search.")
                     
-                    #TODO: Idea; add advanced options like scaling, offset, combination of units
-                    
+                    # --- Last-resort manual conversion override ---
+                    with st.expander("⚙️ Advanced: manual conversion override", expanded=False):
+                        st.caption(
+                            "Only use this if your unit is not in QUDT and consider contributing to this open repository yourself. "
+                            "In the meantime, we are trying to provide a temporary solution using the method described below. \n\n  "
+                            "STEPS TO USE: \n\n"
+                            "1. Select the unit that is closest to yours (e.g., if you have 'hectares' and find 'square meters', select 'square meters'). \n\n"
+                            "2. Define how the column's raw values relate to the selected unit: \n\n"
+                            "   `converted = raw × multiplier + offset`."
+                        )
+                        conv_key_prefix = f"conv_{key}_{var_name}"
+
+                        # Lazy init for this table
+                        if key not in st.session_state["uom_manual_conversion"]:
+                            st.session_state["uom_manual_conversion"][key] = {}
+
+                        no_unit_selected = var_name not in st.session_state["uom_selections"].get(key, {})
+                        conv_enabled = st.toggle(
+                            "Enable manual conversion",
+                            value=False,
+                            key=f"{conv_key_prefix}_enabled",
+                            disabled=no_unit_selected,
+                            help="Select a unit above before enabling manual conversion." if no_unit_selected else None,
+                        )
+
+                        conv_multiplier = st.number_input(
+                            "Conversion multiplier",
+                            value=1.0,
+                            format="%.10g",
+                            key=f"{conv_key_prefix}_mult",
+                            disabled=not conv_enabled,
+                            help="Multiplier applied to raw values before offset.",
+                        )
+                        conv_offset = st.number_input(
+                            "Conversion offset",
+                            value=0.0,
+                            format="%.10g",
+                            key=f"{conv_key_prefix}_offset",
+                            disabled=not conv_enabled,
+                            help="Offset added after multiplying. Use 0 if not needed.",
+                        )
+
+                        if conv_enabled:
+                            if conv_multiplier == 0:
+                                st.warning("⚠️ A multiplier of 0 will collapse all values to the offset.")
+                            st.session_state["uom_manual_conversion"][key][var_name] = {
+                                "multiplier": conv_multiplier,
+                                "offset": conv_offset,
+                            }
+                        else:
+                            st.session_state["uom_manual_conversion"][key].pop(var_name, None)
+
                 # Show current selection if exists
                 if var_name in st.session_state["uom_selections"][key]:
                     selected = st.session_state["uom_selections"][key][var_name]
@@ -790,6 +926,14 @@ for tab, key in zip(tabs, tab_labels):
                         with col5:
                             qk = selected["QuantityKind"].replace("http://qudt.org/vocab/quantitykind/", "") if selected["QuantityKind"] else "N/A"
                             st.write(f"**Quantity Kind:** {qk}")
+
+                    # Show manual conversion info if active
+                    conv_info = st.session_state.get("uom_manual_conversion", {}).get(key, {}).get(var_name)
+                    if conv_info:
+                        st.caption(
+                            f"⚙️ Manual conversion: × {conv_info['multiplier']} + {conv_info['offset']}"
+                        )
+
                     st.space('small')
 
                     with col_feedback:
@@ -801,6 +945,27 @@ for tab, key in zip(tabs, tab_labels):
 
                         if var_name in st.session_state["uom_selections"][key]:
                             st.write(icon_feedback) 
+
+        # Approve All button (shown when at least one suggestion is pending approval)
+        pending_vars = [
+            var_name
+            for var_name, status in st.session_state["suggestion_pending"].get(key, {}).items()
+            if status == "pending"
+        ]
+        if pending_vars:
+            st.space('medium')
+            if st.button(
+                f"✅ Approve All ({len(pending_vars)} pending suggestion{'s' if len(pending_vars) != 1 else ''})",
+                key=f"approve_all_{key}",
+                help=(
+                    "We're genuinely flattered by your trust in our robot overlords — truly, it warms our circuits. "
+                    "Please always give the suggestions above a quick sanity check first. "
+                    "Your data will thank you. 🙏"
+                ),
+            ):
+                for var_name in pending_vars:
+                    st.session_state["suggestion_pending"][key][var_name] = "approved"
+                st.rerun()
 
 
 #TODO; How to delete?
@@ -817,7 +982,26 @@ for key, metadata in st.session_state["uom_selections"].items():
         }
         if approved_selections:
             metadata_df = pd.DataFrame(approved_selections).T.reset_index().rename(columns={"index": "name"})
-            uom_selections_export[key] = metadata_df[["name", "unit"]]
+            export_cols = ["name", "unit"]
+
+            # Merge manual conversion values for approved variables
+            manual_conv = st.session_state.get("uom_manual_conversion", {}).get(key, {})
+            multipliers = {}
+            offsets = {}
+            for vn in approved_selections:
+                conv = manual_conv.get(vn)
+                if conv:
+                    multipliers[vn] = conv["multiplier"]
+                    offsets[vn] = conv["offset"]
+
+            if multipliers:
+                metadata_df["conversionMultiplier"] = metadata_df["name"].map(multipliers)
+                export_cols.append("conversionMultiplier")
+            if offsets:
+                metadata_df["conversionOffset"] = metadata_df["name"].map(offsets)
+                export_cols.append("conversionOffset")
+
+            uom_selections_export[key] = metadata_df[export_cols]
 
 st.session_state['metadata_df'] = apply_new_metadata_info(uom_selections_export, st.session_state['metadata_df'], overwrite='yes')
 
@@ -840,12 +1024,17 @@ for tab, key in zip(tabs_selection, tab_labels):
         if key in st.session_state["uom_selections"] and st.session_state["uom_selections"][key]:
             summary_data = []
             for var_name, selection in st.session_state["uom_selections"][key].items():
-                summary_data.append({
+                entry = {
                     "Variable": var_name,
                     "Unit": selection["label"],
                     "Symbol": selection.get("symbol", ""),
-                    "Quantity Kind": selection["QuantityKind"].replace("http://qudt.org/vocab/quantitykind/", "") if selection["QuantityKind"] else "N/A"
-                })
+                    "Quantity Kind": selection["QuantityKind"].replace("http://qudt.org/vocab/quantitykind/", "") if selection["QuantityKind"] else "N/A",
+                }
+                conv = st.session_state.get("uom_manual_conversion", {}).get(key, {}).get(var_name)
+                if conv:
+                    entry["Multiplier"] = conv["multiplier"]
+                    entry["Offset"] = conv["offset"]
+                summary_data.append(entry)
             
             summary_df = pd.DataFrame(summary_data)
             st.dataframe(summary_df, width='stretch')
