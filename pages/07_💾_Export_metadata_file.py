@@ -6,6 +6,7 @@ import ast
 import zipfile
 import re
 import socket
+from urllib.parse import quote as _url_quote
 import threading
 import tempfile
 import time
@@ -17,6 +18,9 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
 
 from csvwlib import CSVWConverter
+
+RDF_ROW_WARNING_THRESHOLD = 50000
+RDF_LIMITED_ROW_COUNT = 1000
 
 add_Soilwise_logo()
 add_Soilwise_contact_sidebar()
@@ -71,12 +75,22 @@ def _csvw_column_from_row(row):
 
     if row.get('unit'):
         col['schema:unitCode'] = row['unit']
+    if row.get('conversionMultiplier') is not None and row.get('conversionMultiplier') != '':
+        try:
+            col['qudt:conversionMultiplier'] = float(row['conversionMultiplier'])
+        except (TypeError, ValueError):
+            pass
+    if row.get('conversionOffset') is not None and row.get('conversionOffset') != '':
+        try:
+            col['qudt:conversionOffset'] = float(row['conversionOffset'])
+        except (TypeError, ValueError):
+            pass
     if row.get('method'):
         col['dc:method'] = row['method']
     if row.get('datatype'):
-        if row['datatype'] == 'date':
-            date_format = row.get('date format')
-            col['datatype'] = {"base": "date", "format": date_format} if date_format else "date"
+        if row['datatype']  in ['date', 'dateTime', 'time']:
+            date_format = row.get('dateTime format')
+            col['datatype'] = {"base": row['datatype'], "format": date_format} if date_format else row['datatype']
         else:
             col['datatype'] = row['datatype']
     if row.get('description'):
@@ -97,6 +111,8 @@ def _build_csvw_table(table_df, url, foreign_keys=None):
     
     if foreign_keys:
         table_schema["foreignKeys"] = foreign_keys
+
+    table_schema["aboutUrl"] = r"{_row}"
 
     return {
         "url": url,
@@ -178,7 +194,7 @@ def _normalize_table_key(value: str) -> str:
 
 def _looks_like_metadata_df(df: pd.DataFrame) -> bool:
     metadata_columns = {
-        "name", "datatype", "description", "unit", "method", "element", "element_uri", "date format"
+        "name", "datatype", "description", "unit", "method", "element", "element_uri", "dateTime format"
     }
     cols = {str(c).strip().lower() for c in df.columns}
     return "name" in cols and (len(cols & metadata_columns) >= 3)
@@ -327,8 +343,8 @@ def _generate_rdf_ttl_local(metadata_by_table: dict, data_by_table: dict) -> str
         server_thread.start()
 
         try:
-            metadata_url = f"http://127.0.0.1:{port}/{metadata_name}"
-            csv_url = f"http://127.0.0.1:{port}/{table_entries[0]['url']}"
+            metadata_url = f"http://127.0.0.1:{port}/{_url_quote(metadata_name)}"
+            csv_url = f"http://127.0.0.1:{port}/{_url_quote(table_entries[0]['url'])}"
 
             # # Debug helper: open generated local CSV in default browser.
             # if DEBUG_OPEN_CSV_URL_DURING_RDF:
@@ -348,6 +364,46 @@ def _generate_rdf_ttl_local(metadata_by_table: dict, data_by_table: dict) -> str
         finally:
             server.shutdown()
             server.server_close()
+
+
+def _prepare_rdf_source_tables(metadata_by_table: dict, data_by_table: dict, row_limit: int | None = None) -> tuple[dict, dict, list]:
+    prepared_tables = {}
+    table_sizes = {}
+    missing_tables = []
+
+    for table_key, metadata_df in metadata_by_table.items():
+        table_df = _resolve_data_table_for_metadata(table_key, metadata_df, data_by_table)
+        if table_df is None:
+            missing_tables.append(table_key)
+            continue
+
+        table_sizes[table_key] = len(table_df)
+        if row_limit is not None and len(table_df) > row_limit:
+            prepared_tables[table_key] = table_df.head(row_limit).copy()
+        else:
+            prepared_tables[table_key] = table_df
+
+    return prepared_tables, table_sizes, missing_tables
+
+
+def _generate_rdf_payloads(metadata_by_table: dict, data_by_table: dict) -> tuple[dict, list]:
+    rdf_payloads = {}
+    rdf_errors = []
+
+    for table_key, metadata_df in metadata_by_table.items():
+        safe_table_key = _safe_filename_component(table_key, fallback="table")
+        one_table_metadata = {table_key: metadata_df}
+
+        try:
+            ttl_text = _generate_rdf_ttl_local(
+                metadata_by_table=one_table_metadata,
+                data_by_table=data_by_table,
+            )
+            rdf_payloads[f"{safe_table_key}.ttl"] = ttl_text.encode("utf-8")
+        except Exception as e:
+            rdf_errors.append(f"{table_key}: {e}")
+
+    return rdf_payloads, rdf_errors
 
 
 # Check if metadata exists in session state
@@ -449,24 +505,67 @@ st.divider()
 st.markdown("#### 4️⃣ RDF")
 st.caption("Resource Description Framework format - [Learn more](https://www.w3.org/RDF/)")
 
-if st.button("Generate RDF", key="rdf_button"):
-    tabular_data_dict = st.session_state.get("tabular_data_dict", {})
-    rdf_payloads = {}
-    rdf_errors = []
+tabular_data_dict = st.session_state.get("tabular_data_dict", {})
+rdf_table_sizes = {
+    table_key: len(table_df)
+    for table_key, table_df in tabular_data_dict.items()
+    if isinstance(table_df, pd.DataFrame)
+}
 
-    for table_key, metadata_df in st.session_state[meta_key].items():
-        safe_table_key = _safe_filename_component(table_key, fallback="table")
-        one_table_metadata = {table_key: metadata_df}
+large_rdf_tables = {
+    table_key: row_count
+    for table_key, row_count in rdf_table_sizes.items()
+    if row_count >= RDF_ROW_WARNING_THRESHOLD
+}
+has_large_rdf_tables = bool(large_rdf_tables)
 
+if large_rdf_tables:
+    large_tables_text = ", ".join(
+        f"{table_key} ({row_count:,} rows)"
+        for table_key, row_count in large_rdf_tables.items()
+    )
+    st.warning(
+        "Large source tables detected. RDF generation will automatically use a limited dataset for speed. "
+        f"Affected tables: {large_tables_text}."
+    )
 
-        try:
-            ttl_text = _generate_rdf_ttl_local(
-                metadata_by_table=one_table_metadata,
-                data_by_table=tabular_data_dict,
-            )
-            rdf_payloads[f"{safe_table_key}.ttl"] = ttl_text.encode("utf-8")
-        except Exception as e:
-            rdf_errors.append(f"{table_key}: {e}")
+rdf_auto_col, rdf_force_col = st.columns(2)
+run_auto_rdf = rdf_auto_col.button("Generate RDF", key="rdf_button")
+if large_rdf_tables:
+    run_force_full_rdf = rdf_force_col.button(
+        "Generate RDF (full dataset)",
+        key="rdf_button_force_full",
+        help="Bypass automatic limiting and use full tables.",
+    )
+else:
+    run_force_full_rdf = False
+
+if run_auto_rdf or run_force_full_rdf:
+    row_limit = None
+    if run_auto_rdf and has_large_rdf_tables:
+        row_limit = RDF_LIMITED_ROW_COUNT
+
+    rdf_input_tables, _, rdf_missing_tables = _prepare_rdf_source_tables(
+        metadata_by_table=st.session_state[meta_key],
+        data_by_table=tabular_data_dict,
+        row_limit=row_limit,
+    )
+
+    if rdf_missing_tables:
+        st.info(
+            "RDF export is missing source data for: "
+            + ", ".join(map(str, rdf_missing_tables))
+        )
+
+    if row_limit is not None:
+        st.caption(
+            f"Generating RDF from at most {RDF_LIMITED_ROW_COUNT:,} rows per table for faster preview."
+        )
+
+    rdf_payloads, rdf_errors = _generate_rdf_payloads(
+        metadata_by_table=st.session_state[meta_key],
+        data_by_table=rdf_input_tables,
+    )
 
     if rdf_errors:
         st.error(

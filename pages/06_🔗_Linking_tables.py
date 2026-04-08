@@ -1,5 +1,6 @@
 import itertools
 import re
+from time import perf_counter
 
 import pandas as pd
 import streamlit as st
@@ -36,6 +37,9 @@ TYPE_PREFERENCE = {
 	"float": 1,
 	"other": 0,
 }
+
+PROFILE_SAMPLE_LIMIT = 5000
+OVERLAP_SAMPLE_LIMIT = 20000
 
 
 def _to_text(value) -> str:
@@ -91,6 +95,25 @@ def _clean_series(series: pd.Series) -> pd.Series:
 	return series.dropna()
 
 
+def _sample_series(series: pd.Series | None, sample_limit: int | None = None) -> pd.Series:
+	if series is None:
+		return pd.Series(dtype="object")
+	sampled = series.dropna()
+	if sample_limit and len(sampled) > sample_limit:
+		sampled = sampled.sample(n=sample_limit, random_state=0)
+	return sampled
+
+
+def _clean_series_sample(series: pd.Series | None, sample_limit: int | None = None) -> pd.Series:
+	raw_sample = _sample_series(series, sample_limit)
+	if raw_sample.empty:
+		return raw_sample
+	if pd.api.types.is_object_dtype(raw_sample) or pd.api.types.is_string_dtype(raw_sample):
+		cleaned = raw_sample.map(_to_text).str.strip()
+		return cleaned[cleaned != ""]
+	return raw_sample
+
+
 def _series_kind(series: pd.Series) -> str:
 	if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
 		return "string"
@@ -111,22 +134,26 @@ def _column_profile(df: pd.DataFrame | None, column_name: str) -> dict:
 			"kind": "other",
 		}
 
-	cleaned = _clean_series(df[column_name])
+	series = df[column_name]
+	kind = _series_kind(series)
+	cleaned = _clean_series_sample(series, PROFILE_SAMPLE_LIMIT)
 	if cleaned.empty:
 		return {
 			"column": column_name,
 			"score": _common_name_bonus(column_name),
 			"unique_ratio": 0.0,
 			"is_unique": False,
-			"kind": _series_kind(df[column_name]),
+			"kind": kind,
 		}
 
-	text_values = cleaned.map(_to_text).str.strip()
-	total_count = len(text_values)
-	unique_count = text_values.nunique(dropna=True)
+	total_count = len(cleaned)
+	unique_count = cleaned.nunique(dropna=True)
 	unique_ratio = unique_count / total_count if total_count else 0.0
-	is_unique = total_count > 0 and unique_count == total_count
-	kind = _series_kind(df[column_name])
+	original_non_null_count = int(series.notna().sum())
+	is_sampled = original_non_null_count > PROFILE_SAMPLE_LIMIT
+	is_unique = total_count > 0 and unique_count == total_count and not is_sampled
+	if is_sampled and unique_ratio >= 0.995:
+		is_unique = True
 	score = (
 		(unique_ratio * 100.0)
 		+ (35.0 if is_unique else 0.0)
@@ -156,6 +183,26 @@ def _value_overlap_metrics(left_df: pd.DataFrame | None, left_column: str, right
 	return overlap_ratio, overlap_count
 
 
+def _column_value_set(df: pd.DataFrame | None, column_name: str) -> set[str]:
+	if df is None or column_name not in df.columns:
+		return set()
+	cleaned = _clean_series_sample(df[column_name], OVERLAP_SAMPLE_LIMIT)
+	values = set(cleaned.map(_to_text).str.strip())
+	values.discard("")
+	return values
+
+
+def _value_overlap_from_sets(left_values: set[str], right_values: set[str]) -> tuple[float, int]:
+	if not left_values or not right_values:
+		return 0.0, 0
+	min_size = min(len(left_values), len(right_values))
+	if min_size == 0:
+		return 0.0, 0
+	overlap_count = len(left_values & right_values)
+	overlap_ratio = overlap_count / min_size
+	return overlap_ratio, overlap_count
+
+
 def _infer_relation_from_profiles(left_profile: dict, right_profile: dict) -> str:
 	if left_profile["is_unique"] and right_profile["is_unique"]:
 		return "one-to-one"
@@ -165,57 +212,98 @@ def _infer_relation_from_profiles(left_profile: dict, right_profile: dict) -> st
 		return "many-to-one"
 	return "many-to-many"
 
-@st.cache_resource()
-def _suggest_link(left_table: str, right_table: str, table_columns: dict, data_dict: dict) -> dict:
-	left_df = data_dict.get(left_table)
-	right_df = data_dict.get(right_table)
-	best_suggestion = {
-		"left_id": "",
-		"right_id": "",
-		"relation": "not linked",
-		"score": -1.0,
-		"reason": "",
-	}
-
-	for left_column in table_columns[left_table]:
-		left_profile = _column_profile(left_df, left_column)
-		for right_column in table_columns[right_table]:
-			right_profile = _column_profile(right_df, right_column)
-			name_bonus = _name_match_bonus(left_column, right_column)
-			overlap_ratio, overlap_count = _value_overlap_metrics(left_df, left_column, right_df, right_column)
-			overlap_bonus = overlap_ratio * 140.0 + min(overlap_count, 5) * 6.0
-			passes_minimum_signal = overlap_count > 0 or name_bonus >= 18.0
-			if not passes_minimum_signal:
-				continue
-
-			pair_score = left_profile["score"] + right_profile["score"] + name_bonus + overlap_bonus
-			if pair_score <= best_suggestion["score"]:
-				continue
-
-			reasons = []
-			if name_bonus >= 18.0:
-				reasons.append("common column naming")
-			if overlap_count > 0:
-				reasons.append("overlapping values")
-			if left_profile["is_unique"] or right_profile["is_unique"]:
-				reasons.append("identifier-like uniqueness")
-			best_suggestion = {
-				"left_id": left_column,
-				"right_id": right_column,
-				"relation": _infer_relation_from_profiles(left_profile, right_profile),
-				"score": pair_score,
-				"reason": ", ".join(reasons),
-			}
-
-	if best_suggestion["score"] < 0.0:
-		return {
+def _find_table_relationships(left_table: str, right_table: str, table_columns: dict, data_dict: dict) -> dict:
+	with st.spinner(f"Find relation in tables; {left_table} → {right_table}"):
+		started_at = perf_counter()
+		left_df = data_dict.get(left_table)
+		right_df = data_dict.get(right_table)
+		best_suggestion = {
 			"left_id": "",
 			"right_id": "",
 			"relation": "not linked",
-			"score": 0.0,
+			"score": -1.0,
 			"reason": "",
 		}
 
+		profile_started_at = perf_counter() #DEBUG
+		left_profiles = {
+			column: _column_profile(left_df, column)
+			for column in table_columns[left_table]
+		}
+		right_profiles = {
+			column: _column_profile(right_df, column)
+			for column in table_columns[right_table]
+		}
+		profile_elapsed = perf_counter() - profile_started_at #DEBUG
+
+		value_set_started_at = perf_counter() #DEBUG
+		left_value_sets = {
+			column: _column_value_set(left_df, column)
+			for column in table_columns[left_table]
+		}
+		right_value_sets = {
+			column: _column_value_set(right_df, column)
+			for column in table_columns[right_table]
+		}
+		value_set_elapsed = perf_counter() - value_set_started_at #DEBUG
+
+		scoring_started_at = perf_counter() #DEBUG
+		for left_column in table_columns[left_table]:
+			left_profile = left_profiles[left_column]
+			for right_column in table_columns[right_table]:
+				right_profile = right_profiles[right_column]
+				name_bonus = _name_match_bonus(left_column, right_column)
+				overlap_ratio, overlap_count = _value_overlap_from_sets(
+					left_value_sets[left_column],
+					right_value_sets[right_column],
+				)
+				overlap_bonus = overlap_ratio * 140.0 + min(overlap_count, 5) * 6.0
+				passes_minimum_signal = overlap_count > 0 or name_bonus >= 18.0
+				if not passes_minimum_signal:
+					continue
+
+				pair_score = left_profile["score"] + right_profile["score"] + name_bonus + overlap_bonus
+				if pair_score <= best_suggestion["score"]:
+					continue
+
+				reasons = []
+				if name_bonus >= 18.0:
+					reasons.append("common column naming")
+				if overlap_count > 0:
+					reasons.append("overlapping values")
+				if left_profile["is_unique"] or right_profile["is_unique"]:
+					reasons.append("identifier-like uniqueness")
+				best_suggestion = {
+					"left_id": left_column,
+					"right_id": right_column,
+					"relation": _infer_relation_from_profiles(left_profile, right_profile),
+					"score": pair_score,
+					"reason": ", ".join(reasons),
+				}
+		scoring_elapsed = perf_counter() - scoring_started_at #DEBUG
+		total_elapsed = perf_counter() - started_at #DEBUG
+
+		if best_suggestion["score"] < 0.0:
+			return {
+				"left_id": "",
+				"right_id": "",
+				"relation": "not linked",
+				"score": 0.0,
+				"reason": "",
+				"timing": { #DEBUG
+					"profile_seconds": round(profile_elapsed, 3),
+					"value_set_seconds": round(value_set_elapsed, 3),
+					"scoring_seconds": round(scoring_elapsed, 3),
+					"total_seconds": round(total_elapsed, 3),
+				},
+			}
+
+		best_suggestion["timing"] = { #DEBUG
+			"profile_seconds": round(profile_elapsed, 3),
+			"value_set_seconds": round(value_set_elapsed, 3),
+			"scoring_seconds": round(scoring_elapsed, 3),
+			"total_seconds": round(total_elapsed, 3),
+		}
 	return best_suggestion
 
 
@@ -259,15 +347,14 @@ table_pairs = list(itertools.combinations(table_keys, 2))
 
 if "table_relationships" not in st.session_state:
 	st.session_state["table_relationships"] = {}
-st.session_state["table_relationships"] = {} # DEBUG
 relationship_records = []
 
 for left_table, right_table in table_pairs:
 	pair_key = f"{left_table}|||{right_table}"
 	stored_relationship = st.session_state["table_relationships"].get(pair_key, {})
 
-	suggested_link = _suggest_link(left_table, right_table, table_columns, data_dict)
-
+	suggested_link = _find_table_relationships(left_table, right_table, table_columns, data_dict)
+	st.write(suggested_link["timing"]) # DEBUG
 	default_relation = stored_relationship.get("relation", suggested_link["relation"])
 	default_left_id = stored_relationship.get("left_id", suggested_link["left_id"])
 	default_right_id = stored_relationship.get("right_id", suggested_link["right_id"])
@@ -323,6 +410,17 @@ for left_table, right_table in table_pairs:
 			st.caption(
 				f"Suggested link: {suggested_link['left_id']} {RELATION_ARROW.get(suggested_link['relation'], '↔')} {suggested_link['right_id']}"
 				+ (f" based on {suggested_link['reason']}." if suggested_link["reason"] else ".")
+			)
+
+		#DEBUG
+		if suggested_link.get("timing"):
+			timing = suggested_link["timing"]
+			st.caption(
+				"Timing: "
+				f"profiles {timing['profile_seconds']}s, "
+				f"value sets {timing['value_set_seconds']}s, "
+				f"scoring {timing['scoring_seconds']}s, "
+				f"total {timing['total_seconds']}s"
 			)
 		if relation != "not linked" and (not left_id or not right_id):
 			st.warning("This pair has a relation but no left/right id selected.")
