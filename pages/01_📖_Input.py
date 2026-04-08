@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import os
 import re
 import hashlib
+import unicodedata
+from dateutil import parser as dateutil_parser
 
 from csvwlib.utils.NumericUtils import NumericUtils
 from csvwlib.utils.datatypeutils import is_compatible_with_datatype
@@ -54,6 +56,7 @@ SESSION_RESET_KEYS = [
     "zenodo_context_files_url",
     "zenodo_context_metadata",
     "zenodo_context_files_from_zip",
+    "zenodo_loaded",
     "primary_keys",
     "context_files",
     "vocab_oversized_matching_results",
@@ -72,11 +75,17 @@ SESSION_RESET_PREFIXES = [
 
 
 def _clear_dependent_session_state_for_new_input():
+    preserve_zenodo_cache_key = st.session_state.get("_active_zenodo_cache_key")
+
     for key in SESSION_RESET_KEYS:
         st.session_state.pop(key, None)
 
     for key in list(st.session_state.keys()):
         if any(key.startswith(prefix) for prefix in SESSION_RESET_PREFIXES):
+            st.session_state.pop(key, None)
+
+    for key in list(st.session_state.keys()):
+        if key.startswith("_zenodo_ingest_cache_") and key != preserve_zenodo_cache_key:
             st.session_state.pop(key, None)
 
     # # Keep non-table context files (e.g. user-provided docs) but remove stale table-derived context.
@@ -174,21 +183,137 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
     return "string"
 
 
-FORMAT_REGEX_DATES = {
-    "%Y-%m-%d": r"^\d{4}-\d{2}-\d{2}$",
-    "%d/%m/%Y": r"^\d{2}/\d{2}/\d{4}$",
-    "%d-%m-%Y": r"^\d{2}-\d{2}-\d{4}$",
-    "%Y/%m/%d": r"^\d{4}/\d{2}/\d{2}$",
-    "%Y-%m": r"^\d{4}-\d{2}$",
-    "%Y/%m": r"^\d{4}/\d{2}$",
-    "%m-%Y": r"^\d{2}-\d{4}$",
-    "%m/%Y": r"^\d{2}/\d{4}$",
+# Comprehensive date/datetime format candidates (strptime tokens).
+FORMAT_CANDIDATES_DATETIME = [
+    # ---- Date-only: numeric ----
+    "%Y-%m-%d",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%Y/%m/%d",
+    "%m/%d/%Y",
+    "%m-%d-%Y",
+    "%d.%m.%Y",
+    "%Y.%m.%d",
+    # Year-month
+    "%Y-%m",
+    "%Y/%m",
+    "%m-%Y",
+    "%m/%Y",
+    # ---- Date-only: month names ----
+    "%d %b %Y",
+    "%d %B %Y",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%d-%b-%Y",
+    "%d/%b/%Y",
+    "%b %Y",
+    "%B %Y",
+    # ---- DateTime: space separator ----
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d-%m-%Y %H:%M:%S",
+    "%d-%m-%Y %H:%M",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%d.%m.%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M",
+    # ---- DateTime: ISO 8601 ----
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S.%f",
+    # ---- DateTime: month names + time ----
+    "%d %b %Y %H:%M:%S",
+    "%d %B %Y %H:%M:%S",
+    "%d %b %Y %H:%M",
+    "%d %B %Y %H:%M",
+    "%b %d, %Y %H:%M:%S",
+    "%B %d, %Y %H:%M:%S",
+    "%b %d, %Y %H:%M",
+    "%B %d, %Y %H:%M",
+    # ---- Time-only ----
+    "%H:%M:%S",
+    "%H:%M",
+    "%H:%M:%S.%f",
+]
+
+# Non-English month name → English for broader locale support.
+_MONTH_TRANSLATION: Dict[str, str] = {
+    # German
+    "januar": "January", "jänner": "January", "februar": "February",
+    "feber": "February", "märz": "March", "mai": "May",
+    "juni": "June", "juli": "July", "oktober": "October",
+    "dezember": "December",
+    "mär": "Mar", "okt": "Oct", "dez": "Dec",
+    # French
+    "janvier": "January", "février": "February", "mars": "March",
+    "avril": "April", "juin": "June", "juillet": "July",
+    "août": "August", "septembre": "September", "octobre": "October",
+    "novembre": "November", "décembre": "December",
+    "janv": "Jan", "févr": "Feb", "avr": "Apr",
+    "juil": "Jul", "sept": "Sep", "déc": "Dec",
+    # Spanish
+    "enero": "January", "febrero": "February", "marzo": "March",
+    "mayo": "May", "junio": "June", "julio": "July",
+    "agosto": "August", "septiembre": "September", "octubre": "October",
+    "noviembre": "November", "diciembre": "December",
+    # Italian
+    "gennaio": "January", "febbraio": "February", "aprile": "April",
+    "maggio": "May", "giugno": "June", "luglio": "July",
+    "settembre": "September", "ottobre": "October",
+    # Dutch
+    "januari": "January", "februari": "February", "maart": "March",
+    "mei": "May",
+    # Portuguese
+    "fevereiro": "February", "março": "March", "maio": "May",
+    "junho": "June", "julho": "July", "setembro": "September",
+    "outubro": "October", "dezembro": "December",
 }
 
-def detect_date_format_from_series(s: pd.Series, sample_size: int = 200) -> str:
-    """Infer the dominant date format in a pandas Series.
+_MONTH_PATTERN = re.compile(
+    "|".join(re.escape(k) for k in sorted(_MONTH_TRANSLATION, key=len, reverse=True)),
+    re.IGNORECASE,
+)
 
-    Returns a strptime format token like %Y-%m-%d, %d/%m/%Y, etc.
+
+def _normalize_datetime_string(val: str) -> str:
+    """Normalize a datetime string for broader format matching.
+
+    Handles fullwidth digits, CJK date separators (年月日時分秒),
+    and non-English month names.
+    """
+    val = unicodedata.normalize("NFKC", val)
+    # CJK date / time separators → standard delimiters
+    val = val.replace("年", "-").replace("月", "-").replace("日", "")
+    val = val.replace("時", ":").replace("分", ":").replace("秒", "")
+    val = val.strip(" -:T")
+    # Translate non-English month names
+    val = _MONTH_PATTERN.sub(lambda m: _MONTH_TRANSLATION[m.group(0).lower()], val)
+    return val.strip()
+
+
+def _strip_tz_suffix(val: str) -> str:
+    """Remove trailing timezone indicators for strptime matching."""
+    val = val.rstrip()
+    if val.endswith("Z") or val.endswith("z"):
+        return val[:-1]
+    if re.search(r'[+-]\d{2}:\d{2}$', val):
+        return val[:-6]
+    if re.search(r'[+-]\d{4}$', val):
+        return val[:-5]
+    return val
+
+@st.cache_data()
+def detect_date_format_from_series(s: pd.Series, sample_size: int = 200) -> str:
+    """Infer the dominant date/datetime format in a pandas Series.
+
+    Returns a strptime format token (e.g. %Y-%m-%d, %d/%m/%Y %H:%M:%S).
+    Handles date-only, datetime, time-only, and Unicode-formatted strings
+    (CJK separators, fullwidth digits, non-English month names).
     If no consistent format is detected, returns an empty string.
     """
     series = s.dropna().astype(str).str.strip()
@@ -196,35 +321,50 @@ def detect_date_format_from_series(s: pd.Series, sample_size: int = 200) -> str:
         return ""
     series = series.head(sample_size)
 
-    patterns = {fmt: re.compile(regex) for fmt, regex in FORMAT_REGEX_DATES.items()}
-
-    counts = {k: 0 for k in patterns.keys()}
+    counts: Dict[str, int] = {fmt: 0 for fmt in FORMAT_CANDIDATES_DATETIME}
     valid_total = 0
+    # Adaptive ordering: promote the last successful format to the front
+    # so subsequent values (usually the same format) match on the first try.
+    last_hit: Optional[str] = None
 
     for val in series:
         if not val:
             continue
 
-        matched = False
-        for fmt, pat in patterns.items():
-            if not pat.match(val):
-                continue
+        normalized = _strip_tz_suffix(_normalize_datetime_string(val))
 
+        matched = False
+
+        # Try the previously successful format first
+        if last_hit is not None:
             try:
-                pd.to_datetime(val, format=fmt, errors="raise")
-                counts[fmt] += 1
+                pd.to_datetime(normalized, format=last_hit, errors="raise")
+                counts[last_hit] += 1
                 valid_total += 1
                 matched = True
-                break
             except Exception:
-                continue
+                pass
 
         if not matched:
-            # fallback parse without fixed format (handles month names, etc.)
+            for fmt in FORMAT_CANDIDATES_DATETIME:
+                if fmt == last_hit:
+                    continue  # already tried
+                try:
+                    pd.to_datetime(normalized, format=fmt, errors="raise")
+                    counts[fmt] += 1
+                    valid_total += 1
+                    last_hit = fmt
+                    matched = True
+                    break
+                except Exception:
+                    continue
+
+        if not matched:
+            # Fallback: dateutil handles many additional formats
             try:
-                pd.to_datetime(val, errors="raise")
+                dateutil_parser.parse(normalized)
                 valid_total += 1
-            except Exception:
+            except (ValueError, OverflowError):
                 pass
 
     if valid_total == 0:
@@ -236,7 +376,7 @@ def detect_date_format_from_series(s: pd.Series, sample_size: int = 200) -> str:
     # Require a dominant pattern before assigning a format.
     return best_fmt if best_count / valid_total >= 0.6 else ""
 
-
+@st.cache_data()
 def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
     df = df_origin.copy()
     cols = []
@@ -246,11 +386,11 @@ def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
         
         dtype = detect_csvw_datatype_from_series(df[c])
 
-        date_format = detect_date_format_from_series(df[c]) if dtype in ("date", "dateTime", "time") else ""
+        Date_Time_format = detect_date_format_from_series(df[c]) if dtype in ("date", "dateTime", "time") else ""
         cols.append({
             "name": c,
             "datatype": dtype,
-            "date format": date_format,
+            "dateTime format": Date_Time_format,
             "element": "",
             "unit": "",
             "method": "",
@@ -574,6 +714,7 @@ def pick_primary_key(headers: List[str], rows_sample: List[Dict[str,Any]]) -> Op
     return None
 
 # -------------------- UI --------------------
+
 st.title("📖 STEP 1 : input of information")
 
 st.markdown("""
@@ -664,7 +805,7 @@ with col1:
                 st.error(f"Failed to read Excel: {e}")
     elif mode == 'url - zenodo':
         url_input = st.text_input("Enter URL to zenodo records. (prefered format 'https://zenodo.org/records/{ID_number}')", key='url_input')
-        
+
         if url_input:
             # PIN : Zenodo Test URLS
             # https://zenodo.org/records/14034500 -> empty excel
@@ -672,62 +813,80 @@ with col1:
             # https://zenodo.org/records/8083652 -> dubble excel
             # https://zenodo.org/records/10028494 -> complex zip
             # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
+            # https://zenodo.org/records/19177539 -> connected CSV's
             #######################################################
             record_id = get_record_id_from_Zenodo_url(url_input)
             upload_tokens.append(f"zenodo:{record_id}")
-            
+
+            zenodo_cache_key = f"_zenodo_ingest_cache_{record_id}"
+            st.session_state["_active_zenodo_cache_key"] = zenodo_cache_key
+            cached_zenodo = st.session_state.get(zenodo_cache_key)
+            if cached_zenodo is not None:
+                tabular_dict.update({k: v.copy() for k, v in cached_zenodo["tabular_dict"].items()})
+                filename_dict.update(dict(cached_zenodo["filename_dict"]))
+                st.session_state['zenodo_context_files_url'] = list(cached_zenodo["files_url_context"])
+                st.session_state['zenodo_context_metadata'] = dict(cached_zenodo["metadata_context"])
+                zipped_context_files.extend(list(cached_zenodo["zipped_context_files"]))
+            else:
+                # retrieve tabular datafiles based on record_id
+                filtered_extensions_tabular=['.csv','.xlsx','.xls']
+                files_url_tabular = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_tabular)
+
+                # retrieve tabular datafiles based on record_id
+                filtered_extensions_zip=['.zip']
+                files_url_zip = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_zip)
+
+
+                # retrieve context files based on record_id
+                filtered_extensions_context=['.doc','.docx','.pdf','.md', '.txt']
+                files_url_context = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_context)
+                st.session_state['zenodo_context_files_url'] = files_url_context
 
 
 
-            # retrieve tabular datafiles based on record_id
-            filtered_extensions_tabular=['.csv','.xlsx','.xls']
-            files_url_tabular = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_tabular)
-
-            # retrieve tabular datafiles based on record_id
-            filtered_extensions_zip=['.zip']
-            files_url_zip = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_zip)
-
-
-            # retrieve context files based on record_id  
-            filtered_extensions_context=['.doc','.docx','.pdf','.md']
-            files_url_context = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_context)
-            st.session_state['zenodo_context_files_url'] = files_url_context
+                # retrieve metadata and save in session state for later use in context
+                metadata_context_full = get_metadata_from_Zenodo_id(record_id)
+                metadata_context = {k: metadata_context_full[k] for k in {"title","description"} if k in metadata_context_full}
+                if "description" in metadata_context:
+                    metadata_context["description"] = description_to_plain_text(metadata_context["description"])
+                st.session_state['zenodo_context_metadata'] = metadata_context
 
 
 
-            # retrieve metadata and save in session state for later use in context
-            metadata_context_full = get_metadata_from_Zenodo_id(record_id)
-            metadata_context = {k: metadata_context_full[k] for k in {"title","description"} if k in metadata_context_full}
-            if "description" in metadata_context:
-                metadata_context["description"] = description_to_plain_text(metadata_context["description"])
-            st.session_state['zenodo_context_metadata'] = metadata_context
+                for file_url in files_url_tabular:
 
 
+                    file_response,name_file, ext_file = request_file_from_zenodo(file_url)
 
-            for file_url in files_url_tabular:
-
-                
-                file_response,name_file, ext_file = request_file_from_zenodo(file_url)
-
-                if ext_file in ['.xlsx','.xls']:
-                    bitesIO = io.BytesIO(file_response.content)
-                    bitesIO.name = name_file
-                    df_dict = get_excel(bitesIO)
-                    for sheet_name, df in df_dict.items():
-                        tabular_dict[f"{name_file} | {sheet_name}"] = df
+                    if ext_file in ['.xlsx','.xls']:
+                        bitesIO = io.BytesIO(file_response.content)
+                        bitesIO.name = name_file
+                        df_dict = get_excel(bitesIO)
+                        for sheet_name, df in df_dict.items():
+                            tabular_dict[f"{name_file} | {sheet_name}"] = df
+                            filename_dict[name_file] = file_url
+                    elif ext_file == '.csv':
+                        uploaded_df = read_csvBytes_with_sniffer(file_response.content)
+                        tabular_dict[name_file] = uploaded_df
                         filename_dict[name_file] = file_url
-                elif ext_file == '.csv':
-                    uploaded_df = read_csvBytes_with_sniffer(file_response.content)
-                    tabular_dict[name_file] = uploaded_df
-                    filename_dict[name_file] = file_url
-            for file_url in files_url_zip:
-                st.write(f"diving into zip; {file_url}")
-                process_zip_from_url(file_url,
-                                        tabular_dict,
-                                        zipped_context_files,
-                                        filename_dict,
-                                        tabular_exts=filtered_extensions_tabular,
-                                        context_exts=filtered_extensions_context)
+                for file_url in files_url_zip:
+                    st.write(f"diving into zip; {file_url}")
+                    process_zip_from_url(file_url,
+                                            tabular_dict,
+                                            zipped_context_files,
+                                            filename_dict,
+                                            tabular_exts=filtered_extensions_tabular,
+                                            context_exts=filtered_extensions_context)
+
+                st.session_state[zenodo_cache_key] = {
+                    "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
+                    "filename_dict": dict(filename_dict),
+                    "zipped_context_files": list(zipped_context_files),
+                    "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
+                    "metadata_context": dict(st.session_state.get('zenodo_context_metadata', {})),
+                }
+    if mode != 'url - zenodo':
+        st.session_state["_active_zenodo_cache_key"] = None
     st.session_state["zenodo_context_files_from_zip"] = zipped_context_files
 
     if  mode != 'url - zenodo':
@@ -789,6 +948,8 @@ if tabular_dict:
     st.markdown(""" --- """)
     st.markdown(f"### Data preview")
     st.caption("HINT: SHIFT+scroll to navigate the tabs horizontally if needed.")
+
+    # HTML for having the tabs colored for better UX and more visible + gap between them
     st.markdown("""
             <style>
                 .stTabs [data-baseweb="tab-list"] {
@@ -808,6 +969,7 @@ if tabular_dict:
                 }
 
             </style>""", unsafe_allow_html=True)
+    
     # Create one tab per key
     tab_labels = list(tabular_dict.keys())
     tabs = st.tabs(tab_labels)
@@ -816,6 +978,8 @@ if tabular_dict:
     error_tabs_explain = []
     tables_to_discard = set()
     tables_to_context = set()
+
+
     if "context_files" not in st.session_state:
         st.session_state["context_files"] = []
     if "primary_keys" not in st.session_state:
@@ -824,7 +988,7 @@ if tabular_dict:
         st.session_state["primary_keys_guess"] = {}
 
     for tab, key in zip(tabs, tab_labels):
-        df = tabular_dict[key].copy()
+        df = tabular_dict[key]
 
         with tab:
 
@@ -833,7 +997,7 @@ if tabular_dict:
             move_toggle_key = f"move_to_context_{key}"
 
             discard_table = st.toggle(
-                "Discard table for further annotation and processing",
+                "Discard this table, it doesn't contain tabular data to be annotated",
                 key=discard_toggle_key,
             )
             if not discard_table:
@@ -909,10 +1073,13 @@ if tabular_dict:
             if key not in st.session_state[meta_key]:
                 st.session_state[meta_key][key] = build_metadata_df_from_df(df)
 
-            primary_keys_guess= pick_primary_key(df.columns.tolist(), df.head(200).to_dict(orient='records'))
-            st.session_state["primary_keys_guess"][key] = primary_keys_guess
+            if key not in st.session_state["primary_keys_guess"]:
+                st.session_state["primary_keys_guess"][key] = pick_primary_key(
+                    df.columns.tolist(), df.head(200).to_dict(orient='records')
+                )
+            primary_keys_guess = st.session_state["primary_keys_guess"][key]
             st.session_state["primary_keys"][key]=st.selectbox(
-                "Select primary key column (if applicable)",
+                "Select primary key column (if present)",
                 options=[''] + df.columns.tolist(),
                 index=0 if primary_keys_guess is None else df.columns.get_loc(primary_keys_guess) + 1,
                 key=f"primary_key_select_{key}",
@@ -937,13 +1104,12 @@ if tabular_dict:
                             original_metadata_df,
                             width='stretch',
                             key=f"editor_{key}",
-                            disabled=[col for col in all_columns if col != "datatype" and col != "date format"],
+                            disabled=[col for col in all_columns if col != "datatype" and col != "dateTime format"],
                             column_config={
                                 "datatype": st.column_config.SelectboxColumn(
                                     options=DATA_TYPE_OPTIONS,
                                 ),
-                            },
-                            
+                            }, 
                         )
 
             if not edited_df.equals(original_metadata_df):
@@ -953,9 +1119,7 @@ if tabular_dict:
                                                     st.session_state.get(meta_key),
                                                     overwrite='yes_incl_blanks'
                                                     )
-                    st.rerun()               
-
-
+                    st.rerun()
 
     context_tables_added = 0
     if tables_to_context:
@@ -1026,5 +1190,6 @@ if tabular_dict:
 
     st.markdown("## DEBUG OUTPUT")
     st.json(st.session_state[meta_key])
+
 # -------------------- reach us --------------------
 add_Soilwise_contact_sidebar()
