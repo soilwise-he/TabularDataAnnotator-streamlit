@@ -301,7 +301,7 @@ def generate_descriptions_with_LLM(var_list: List[str], context: str, human_desc
 
     return variable_descriptions
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def load_sentence_model(modelname="all-MiniLM-L6-v2"):
     with st.spinner(f"🔄 Loading embedding model '{modelname}'... This may take a few seconds."):
         from sentence_transformers import SentenceTransformer # Heavy loader
@@ -577,6 +577,207 @@ def get_UoM_Ansis_guess(dict_vocab:Dict, dicts_selection:Dict)-> Dict:
                 results_dict[key][hit.get('query')]['selected_UoM'] = (hit['applicableUnit'],hit['quantityKind'])
             
         return results_dict
+
+
+@st.fragment
+def _render_vocab_tab(key):
+    """Render one vocabulary-matching tab as a fragment (partial rerun on interaction)."""
+    grouped_sorted = st.session_state["vocab_matching_results"][key]
+
+    if key not in st.session_state["vocab_custom_uri"]:
+        st.session_state["vocab_custom_uri"][key] = {}
+
+    query_list = list(grouped_sorted.keys())
+
+    # Build a lookup for query descriptions from the metadata table
+    meta_df = st.session_state.get("metadata_df", {}).get(key)
+    query_desc_map = {}
+    if meta_df is not None and "name" in meta_df.columns and "description" in meta_df.columns:
+        for _, r in meta_df[["name", "description"]].iterrows():
+            desc = r["description"]
+            if isinstance(desc, str) and desc.strip():
+                query_desc_map[r["name"]] = desc
+
+    for query in query_list:
+        hits_all = grouped_sorted[query]
+
+        with st.expander(f"**{query}**", expanded=True):
+            # Show the variable's own description from the metadata table
+            q_desc = query_desc_map.get(query)
+            if q_desc:
+                st.caption(f"📋 {q_desc}")
+
+            col_radio, col_k = st.columns([6, 1])
+
+            with col_k:
+                k_nearest_key = f"k_nearest_{key}_{query}"
+                k_nearest = st.number_input(
+                    "\# of suggestions",
+                    min_value=1, max_value=min(50, len(hits_all)),
+                    value=min(5, len(hits_all)),
+                    key=k_nearest_key,
+                )
+
+            hits_display = hits_all[:k_nearest]
+
+            # Build radio options: None, hits, Custom URI
+            option_ids = (
+                ["__none__"]
+                + [h["id"] for h in hits_display]
+                + ["__custom__"]
+            )
+
+            # Build display labels (first line: label + source + distance)
+            def _fmt(opt, _hits=hits_display):
+                if opt == "__none__":
+                    return "⛔ None (no match)"
+                if opt == "__custom__":
+                    return "✏️ Custom URI"
+                for h in _hits:
+                    if h["id"] == opt:
+                        dist = h.get("Distance")
+                        dist_str = f"(dist: {dist:.4f})" if isinstance(dist, (int, float)) else ""
+                        return (
+                            f"{h['label']}  —  {h.get('source', '')}  "
+                            f"{dist_str}"
+                        )
+                return opt
+
+            # Build captions (second line: description/definition)
+            def _caption(opt, _hits=hits_display):
+                if opt in ("__none__", "__custom__"):
+                    return ""
+                for h in _hits:
+                    if h["id"] == opt:
+                        defn = h.get("definition") or h.get("description") or ""
+                        if not isinstance(defn, str):
+                            return ""
+                        return defn
+                return ""
+
+            captions = [_caption(o) for o in option_ids]
+
+            radio_key = f"radio_{key}_{query}"
+
+            # If the stored selection is no longer in the visible options
+            # (e.g. k_nearest decreased), reset to closest hit.
+            if st.session_state.get(radio_key) not in option_ids:
+                st.session_state[radio_key] = option_ids[1] if len(option_ids) > 2 else "__none__"
+
+            with col_radio:
+                selected = st.radio(
+                    f"Select match for *{query}*",
+                    options=option_ids,
+                    format_func=_fmt,
+                    captions=captions,
+                    key=radio_key,
+                    label_visibility="collapsed",
+                )
+
+            # Show custom URI input when that option is chosen
+            if selected == "__custom__":
+                custom_val = st.session_state["vocab_custom_uri"][key].get(query, "")
+                custom_uri = st.text_input(
+                    "Enter custom URI:",
+                    value=custom_val,
+                    key=f"custom_uri_{key}_{query}",
+                )
+                st.session_state["vocab_custom_uri"][key][query] = custom_uri
+
+            # Show details of selected hit
+            if selected not in ("__none__", "__custom__"):
+                for h in hits_display:
+                    if h["id"] == selected:
+                        if h.get("uri"):
+                            st.caption(f"🔗 {h['uri']}")
+                        break
+
+    # --- Derive backward-compatible session state ---
+    if key in st.session_state.get("vocab_row_selection", {}):
+        for rid in st.session_state["vocab_row_selection"][key]:
+            st.session_state["vocab_row_selection"][key][rid] = False
+
+    all_selected_rows = []
+    for query in query_list:
+        hits_all = grouped_sorted[query]
+        radio_key = f"radio_{key}_{query}"
+        sel = st.session_state.get(radio_key, "__none__")
+
+        if sel not in ("__none__", "__custom__"):
+            st.session_state["vocab_row_selection"][key][sel] = True
+            for h in hits_all:
+                if h["id"] == sel:
+                    all_selected_rows.append(h)
+                    break
+        elif sel == "__custom__":
+            custom_uri = st.session_state["vocab_custom_uri"][key].get(query, "")
+            if custom_uri:
+                all_selected_rows.append({
+                    "query": query,
+                    "label": "custom",
+                    "uri": custom_uri,
+                    "source": "custom",
+                    "id": f"{query}__custom",
+                    "Distance": 0.0,
+                })
+
+    selected_rows_df = pd.DataFrame(all_selected_rows) if all_selected_rows else pd.DataFrame()
+    st.session_state["df_selection_keywords"][key] = selected_rows_df
+    
+    # Anchor link to scroll back to the top of the matching section
+    st.markdown(
+        '<a href="#vocab-match-anchor" style="text-decoration:none;">⬆ Back to top</a>',
+        unsafe_allow_html=True,
+    )
+    
+    # --- Summary of selections ---
+    unique_queries = query_list
+
+    if not selected_rows_df.empty:
+        st.markdown("##### ➜ Selected Matches")
+
+        summary_df = (
+            selected_rows_df
+            .groupby("query", sort=False, as_index=False)
+            .agg({
+                "label": lambda x: list(set(x)),
+                "uri": lambda x: list(set(x)),
+            })
+        )
+
+        missing = [q for q in unique_queries if q not in summary_df["query"].values]
+        if missing:
+            df_missing = pd.DataFrame({
+                "query": missing,
+                "label": [[] for _ in missing],
+                "uri":   [[] for _ in missing],
+            })
+            summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
+
+        summary_df["element_uri"] = summary_df.apply(
+            lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
+            axis=1,
+        )
+        summary_df["query"] = pd.Categorical(
+            summary_df["query"], categories=unique_queries, ordered=True
+        )
+        summary_df = summary_df.sort_values("query").reset_index(drop=True)
+        summary_df["label"] = summary_df["label"].apply(lambda x: ", ".join(x))
+        summary_df["uri"] = summary_df["uri"].apply(lambda x: " || ".join(x))
+        st.dataframe(
+            summary_df,
+            column_config={"uri": st.column_config.LinkColumn()},
+        )
+
+        summary_df = summary_df.rename(columns={"query": "name", "label": "element"})
+        st.session_state['metadata_df'] = apply_new_metadata_info(
+            {key: summary_df}, st.session_state['metadata_df'], overwrite='yes_incl_blanks'
+        )
+
+    else:
+        st.info("No rows selected.")
+
+
 # PIN -------------------- UI --------------------
 st.title("🕵️ STEP 3 : Keyword Matching")
 
@@ -618,6 +819,10 @@ else:
 
     if "df_selection_keywords" not in st.session_state:
         st.session_state["df_selection_keywords"] = {}
+    
+    # Scroll anchor
+    st.markdown('<a id="vocab-match-anchor"></a>', unsafe_allow_html=True)
+
 
     if st.button("Find Vocabulary Terms In Thesaury"):
 
@@ -639,6 +844,7 @@ else:
                 key_result = result.get('id')
                 st.session_state["vocab_row_selection"][key][key_result]=False
             st.session_state["vocab_row_selection_status"][key]="initialised"
+        
 
         st.success("✅ Matching complete!")
 
@@ -671,31 +877,34 @@ else:
             }
 
 
-            final_results = []
+            # Store all filtered+sorted hits per query (sliced later by k_nearest input)
+            grouped_sorted = {}
             keys_closest_filtered = []
             for query, hits in grouped_incl_blank.items():
-                
-                hits_sorted = sorted(
-                    hits,
-                    key=lambda x: x["Distance"],
-                    reverse=False
-                )
+                hits_sorted = sorted(hits, key=lambda x: x["Distance"])
                 keys_closest_filtered.append(hits_sorted[0]["id"])
-                k_nearest_visualised = 5
-                final_results.extend(hits_sorted[:k_nearest_visualised])
+                grouped_sorted[query] = hits_sorted
+
+            st.session_state["vocab_matching_results"][key] = grouped_sorted
+
+            # Auto-select the closest hit per query on first run
+            if st.session_state["vocab_row_selection_status"][key] == "initialised":
+                for query, hits_sorted in grouped_sorted.items():
+                    radio_key = f"radio_{key}_{query}"
+                    if radio_key not in st.session_state:
+                        st.session_state[radio_key] = hits_sorted[0]["id"]
+                # Keep vocab_row_selection in sync for downstream UoM code
+                for kid in keys_closest_filtered:
+                    st.session_state["vocab_row_selection"][key][kid] = True
+                st.session_state["vocab_row_selection_status"][key] = "first proces done"
 
 
-            st.session_state["vocab_matching_results"][key] = final_results
-
-            if not st.session_state["vocab_row_selection_status"][key] =="initialised":
-                continue
-            for key_closest_filtered in keys_closest_filtered:
-                st.session_state["vocab_row_selection"][key][key_closest_filtered] = True
-            st.session_state["vocab_row_selection_status"][key] = "first proces done"
-            
-
+    if "vocab_custom_uri" not in st.session_state:
+        st.session_state["vocab_custom_uri"] = {}
 
     if st.session_state["vocab_matching_results"]:
+
+
 
         tab_labels_matching = list(st.session_state["vocab_matching_results"].keys())
         tabs_matching = st.tabs(tab_labels_matching)
@@ -703,108 +912,13 @@ else:
         st.divider()
         for tab_idx, (tab, key) in enumerate(zip(tabs_matching, tab_labels_matching), start=1):
             with tab:
-                vocab_match_dict = st.session_state["vocab_matching_results"][key]
-                result_df = pd.DataFrame(vocab_match_dict)
+                _render_vocab_tab(key)
 
-                ## Add a checkbox column if it doesn't exist
-                # if "Selected" not in result_df.columns:
-                #     result_df.insert(1, "Selected", False) 
-                #     # Set "Selected" to True for the row with the lowest Distance in each group of "query"
-                #     idx_min_distance = result_df.groupby("query")["Distance"].idxmin()
-                #     result_df.loc[idx_min_distance, "Selected"] = True
-                
-                result_df["Selected"] = result_df["id"].map(
-                    lambda rid: st.session_state["vocab_row_selection"][key].get(rid, False)
+                # Anchor link to scroll back to the top of the matching section
+                st.markdown(
+                    '<a href="#vocab-match-anchor" style="text-decoration:none;">⬆ Back to top</a>',
+                    unsafe_allow_html=True,
                 )
-
-                #TODO: process only once?
-                styled_df = add_visual_row_group(result_df)
-
-                #TODO: change headers? Also include " original header description"?
-                column_list = styled_df.columns.tolist()
-                disabling_columns= column_list.copy()
-                disabling_columns.remove("Selected")
-                priority_cols = [" ", "Selected", "query", "label", "definition"]
-                new_order = [c for c in priority_cols if c in column_list] + [c for c in column_list if c not in priority_cols]
-                new_order.remove("id")
-
-                # Use a form so multiple checkbox edits are applied in one go.
-                with st.form(key=f"vocab_form_{key}", clear_on_submit=False):
-                    edited_df = st.data_editor(
-                        styled_df,
-                        disabled=disabling_columns,
-                        column_order=new_order,
-                        num_rows="dynamic",
-                        width='stretch',
-                        key=f"editable_vocab_df_{key}",
-                        hide_index=True
-                    )
-
-                    apply_selection_changes = st.form_submit_button(
-                        f"Apply changes - table {tab_idx}",
-                        type="primary",
-                    )
-
-
-                if apply_selection_changes:
-                    # Persist all current checkbox states at once.
-                    for _, row in edited_df[["id", "Selected"]].iterrows():
-                        st.session_state["vocab_row_selection"][key][row["id"]] = bool(row["Selected"])
-
-                # Process selected rows from session state (stable across reruns).
-                selected_rows = result_df[
-                    result_df["id"].map(
-                        lambda rid: st.session_state["vocab_row_selection"][key].get(rid, False)
-                    )
-                ].copy()
-
-                st.session_state["df_selection_keywords"][key] = selected_rows
-
-                # Drop duplicates while preserving original order of 'query'
-                unique_queries = result_df["query"].drop_duplicates()
-
-                if not selected_rows.empty:
-                    st.markdown("##### -> Selected Rows")
-                    
-                    summary_df = (
-                        selected_rows
-                        .groupby("query", sort=False, as_index=False)
-                        .agg({
-                            "label": lambda x: list(set(x)),  # use set() to keep unique labels
-                            "uri": lambda x: list(set(x))     # use set() to keep unique URIs
-                        })
-                    )
-
-                    orig_queries = list(unique_queries)
-                    missing = [q for q in orig_queries if q not in summary_df["query"].values]
-                    if missing:
-                        df_missing = pd.DataFrame({
-                            "query": missing,
-                            "label": [ [] for _ in missing ],
-                            "uri":   [ [] for _ in missing ]
-                        })
-                        summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
-
-                    summary_df["element_uri"] = summary_df.apply(
-                        lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
-                        axis=1
-                    )
-                    # Reorder rows according to the original query order
-                    summary_df["query"] = pd.Categorical(summary_df["query"], categories=unique_queries, ordered=True)
-                    summary_df = summary_df.sort_values("query").reset_index(drop=True)
-                    summary_df["label"] = summary_df["label"].apply(lambda x: ", ".join(x))
-                    summary_df["uri"] = summary_df["uri"].apply(lambda x: " || ".join(x))
-                    st.dataframe(summary_df,
-                                    column_config={
-                                        "uri": st.column_config.LinkColumn()
-                                    })
-                    
-                    summary_df = summary_df.rename(columns={"query": "name","label":"element"})
-
-                    st.session_state['metadata_df'] = apply_new_metadata_info({key : summary_df}, st.session_state['metadata_df'], overwrite='yes_incl_blanks')
-
-                else:
-                    st.info("No rows selected.")
 
 
     # Prep UoM section with Ansis links
