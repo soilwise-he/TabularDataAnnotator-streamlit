@@ -275,24 +275,8 @@ File Parsing:    PyPDF2, python-docx, openpyxl
 ML Libraries:    scikit-learn, NumPy
 ```
 
-
 ---
 
-## 7. Configuration & Extensibility
-
-### Environment Variables
-- `OPENAI_API_KEY`: API credentials for OpenAI
-- `APERTUS_API_KEY`: API credentials for Apertus (optional)
-
-### Customization Points
-- **Embedding Model**: Configurable via `load_sentence_model(modelname)`
-- **LLM Provider**: Toggle between OpenAI and Apertus
-- **System Prompt**: Modify instructions in `generate_descriptions_with_LLM()`
-- **Vocabulary Index**: Replace FAISS index files for different domains
-
-
-
----
 ## Soilwise-he project
 This work has been initiated as part of the [Soilwise-he](https://soilwise-he.eu) project. The project 
 receives funding from the European Union’s HORIZON Innovation Actions 2022 under grant agreement 
