@@ -11,7 +11,7 @@ The tool addresses the data annotation workflow by:
 3. **Linking to selected vocabularies**: Semantic embeddings match descriptions to controlled vocabularies for standardization
 4. **Standardised annotation-exports**: Support for CSVW- and TableSchema-style exports, which can be added alongside the dataset on public repositories to improve FAIRness
 
-## Features
+### Features
 
 | Feature | Implementation | Purpose |
 |---------|----------------|---------|
@@ -30,34 +30,13 @@ A ready-made instance is available at **https://dataannotator-swr.streamlit.app/
 
 If the hosted instance is no longer available, you can [fork this repository](https://github.com/soilwise-he/TabularDataAnnotator-streamlit/fork) and deploy your own copy to the free [Streamlit Community Cloud](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy).
 
----
 
 ### Option B — Local Installation
 
-#### System Requirements
-
-| Requirement | Version |
-|-------------|---------|
-| **Python** | 3.12 or higher |
-| **Operating System** | Windows 10+, macOS 12+, Linux (any modern distro) |
-| **Disk space** | ~2 GB (model + dependencies) |
-| **Internet access** | Required for first-time dependency/model download; optional afterwards |
-
-#### Step 1 — Install the `uv` package manager
+#### Step 1 — Install the `uv` package manager - if not already been done
 
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/) is a fast Python package manager used to manage this project's dependencies.
 
-**macOS / Linux:**
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-**Windows (PowerShell):**
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-After installation, restart your terminal so the `uv` command is available.
 
 #### Step 2 — Clone the repository
 
@@ -72,7 +51,7 @@ cd TabularDataAnnotator-streamlit
 uv sync
 ```
 
-This installs all required packages (Streamlit, FAISS, Sentence Transformers, OpenAI client, etc.) into an isolated virtual environment.
+This installs all required packages into an isolated virtual environment.
 
 #### Step 4 — Configure environment variables (optional)
 
@@ -84,8 +63,6 @@ OPENAI_API_KEY=sk-...          # Required for OpenAI (GPT) models
 APERTUS_API_KEY=your-key-here  # Optional — only needed for the Apertus provider
 ```
 
-> **Note:** LLM integration is entirely optional. You can annotate datasets manually or use the pre-computed vocabulary matching without any API key.
-
 #### Step 5 — Run the application
 
 ```bash
@@ -94,43 +71,6 @@ uv run streamlit run app_annotator.py
 
 Streamlit will print a local URL (typically `http://localhost:8501`). Open it in your browser to access the app.
 
-#### Pre-embedded Vocabulary Indexes
-
-The repository ships with pre-computed FAISS vector indexes located in the `data/` directory:
-
-```
-data/
-├── vocabCombined-models_local--all-MiniLM-L6-v2.index   # FAISS binary index
-└── vocabCombined-models_local--all-MiniLM-L6-v2-meta.npz # Term metadata (URI, label, definition)
-```
-
-These indexes cover four vocabularies (Agrovoc, GEMET, GLOSIS, ISO 11074:2005) and are loaded automatically on startup — no extra steps needed.
-
-#### Verification
-
-After the app starts, you should see output similar to:
-
-```
-You can now view your Streamlit app in your browser.
-
-  Local URL: http://localhost:8501
-  Network URL: http://192.168.x.x:8501
-```
-
-Open `http://localhost:8501` in your browser. If the DataAnnotator interface loads, the installation was successful.
-
-#### Troubleshooting
-
-| Problem | Likely cause | Solution |
-|---------|-------------|----------|
-| `uv: command not found` | `uv` not installed or not on PATH | Restart your terminal after installing `uv` |
-| `Python 3.12 required` | Wrong Python version | Install Python 3.12+ from [python.org](https://www.python.org/downloads/) or via your system package manager |
-| Port 8501 already in use | Another process is using the port | Run `uv run streamlit run app_annotator.py --server.port 8502` to use a different port |
-| Slow first startup | Sentence Transformer model loading | The `all-MiniLM-L6-v2` model is loaded from `models_local/`; subsequent starts are faster |
-| OpenAI API errors | Missing or invalid API key | Check that `OPENAI_API_KEY` is set correctly in your `.env` file or shell environment |
-| `faiss` import error on Windows | Missing Visual C++ redistributable | Install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) |
-
----
 
 ## 3. System Architecture
 
