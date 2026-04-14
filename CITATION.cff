@@ -27,11 +27,8 @@ identifiers:
 references:
   - type: grant
     title: "SoilWise — Enabling Soil Data and Knowledge for Informed Decision-Making"
-    authors:
   - name: "European Commission"
     number: "101112838"
-    institution:
-    name: "European Union"
     url: "https://doi.org/10.3030/101112838"
 keywords:
   - "soil data"
