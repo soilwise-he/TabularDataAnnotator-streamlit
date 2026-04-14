@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1094978630.svg)](https://doi.org/10.5281/zenodo.19569572)
+
 # SoilWise-he Tabular DataAnnotator
 
 ## 1. Overview
