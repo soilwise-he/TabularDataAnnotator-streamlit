@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import io
 import json
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -11,10 +10,8 @@ from openai import OpenAI
 import re
 import unicodedata
 
-from sklearn.preprocessing import normalize
-from tqdm import tqdm
 import requests
-import csv
+from bs4 import BeautifulSoup
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_cache_button
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -27,7 +24,6 @@ from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 from docx.text.paragraph import Paragraph
 from docx.table import Table
-from docx.oxml.ns import nsmap
 
 
 add_Soilwise_logo()
@@ -43,18 +39,6 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 # -------------------- Helper data and functions --------------------
 
-DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
-                     'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
-                     'integer', 'long', 'int', 'short', 'byte',
-                     'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
-                     'unsignedInt', 'unsignedShort', 'unsignedByte',
-                     'nonPositiveInteger', 'negativeInteger', 'double',
-                     'number', 'duration', 'dayTimeDuration', 'yearMonthDuration',
-                     'float', 'gDay', 'gMonth', 'gMonthDay', 'gYear', 'gYearMonth',
-                     'hexBinary', 'QName', 'string', 'normalizedString', 'token',
-                     'language', 'Name', 'NMTOKEN', 'time', 'xml', 'html', 'json']
-
-
 @dataclass
 class ContextFile:
     name: str
@@ -64,22 +48,6 @@ class ContextFile:
     ext:str
 
 
-
-
-@st.cache_resource()
-def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
-    raw = uploaded_file.getvalue()
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        import chardet
-        enc = chardet.detect(raw)["encoding"] or "cp1252"
-        text = raw.decode(enc, errors="replace")
-
-    dialect_uploaded = csv.Sniffer().sniff(text, delimiters=[",", ";", "\t", "|"])
-    separator_uploaded = dialect_uploaded.delimiter
-    df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
-    return df
 
 
 def _norm_mime(m: Optional[str]) -> str:
@@ -136,6 +104,19 @@ def iter_table_rows_text(table):
 
 
 @st.cache_resource
+def scrape_webpage_text(url: str) -> str:
+    """Fetch a webpage and return the visible body text (scripts/styles stripped)."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; DataAnnotator/1.0)"}
+    resp = requests.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
+        tag.decompose()
+    body = soup.find("body") or soup
+    lines = [line.strip() for line in body.get_text(separator="\n").splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
 def read_context_file(contextfile: "ContextFile") -> str:
     """
     Reads ContextFile(content: bytes) and returns extracted text.
@@ -207,9 +188,6 @@ def read_context_file(contextfile: "ContextFile") -> str:
 
     return context_text.strip()
 
-
-def download_bytes(content: bytes, filename: str, mime: str = 'application/octet-stream'):
-    st.download_button(label=f"Download {filename}", data=content, file_name=filename, mime=mime)
 
 CACHE_FILE = "data/openai_cache.json"
 
@@ -633,123 +611,6 @@ def from_prompt_to_json(
 
     return parsed_respons
 
-def embed_vocab(word, definition=None, alpha=0.4):
-
-    """
-        Generates a semantic embedding for a given word, optionally influenced by its definition.
-
-        Parameters:
-        ----------
-        word : str
-            The target word to embed.
-        definition : str or list, optional
-            A textual definition or list of definitions to enrich the word embedding.
-            If None or invalid, the word embedding is used alone.
-        alpha : float, default=0.8
-            Weighting factor between the word and definition embeddings.
-            - alpha = 1.0: use only the word embedding
-            - alpha = 0.0: use only the definition embedding
-            - 0.0 < alpha < 1.0: blend both embeddings
-
-        Returns:
-        -------
-        np.ndarray
-            A normalized vector representing the blended embedding.
-    """
-
-    # encode separately
-    emb_word = model.encode(word, normalize_embeddings=True)
-    
-    # definition embedding
-    if definition and isinstance(definition, str) and definition.strip() and definition.lower() != 'nan':
-        emb_def = model.encode(definition, normalize_embeddings=True)
-    elif isinstance(definition, list) and len(definition) > 0:
-        emb_def_list = model.encode(definition, normalize_embeddings=True)
-        emb_def = emb_def_list.mean(axis=0)
-    else:
-        emb_def = emb_word
-    
-    # weighted combination
-    vec = alpha * emb_word + (1 - alpha) * emb_def
-    vec = normalize(vec.reshape(1, -1)).squeeze()
-    return alpha * emb_word + (1 - alpha) * emb_def
-
-def find_nearest_vocab(df_descriptions, index_lib, meta_data_dict, k_nearest=4):
-    """
-    Find nearest vocabulary matches for each variable description
-    using both prefLabel and altLabel indexes.
-    Deduplicate URIs with preference for prefLabel matches.
-    Return all unique URIs sorted by similarity.
-    """
-    matches = []
-
-    for _, row in tqdm(df_descriptions.iterrows(), total=len(df_descriptions), desc="🔍 Matching with vocabulary"):
-        query = row["name"]
-        definition = row["description"]
-        q_emb = embed_vocab(query, definition).astype("float32").reshape(1, -1)
-
-        # Search in combined index
-        D_match, I_match = index_lib.search(q_emb, k=k_nearest)
-
-        # to get a 1D array
-        indices = I_match.flatten()
-        distances = D_match.flatten()
-
-        # Combine all into a flat list of dicts
-        combined = [
-            {
-                "query": query,
-                "definition": definition,
-                "id": int(idx),
-                **meta_data_dict[int(idx)],  # unpack nested keys
-                "Distance": float(dist)
-            }
-            for idx, dist in zip(indices, distances)
-            if idx in meta_data_dict
-        ]
-
-        df_comb = pd.DataFrame(combined)
-
-        # Sort prefLabel first, then Distance ascending
-        df_comb = df_comb.sort_values(
-            by=["QC_label", "Distance"],
-            ascending=[True, True],
-            key=lambda col: col.map({"prefLabel": 0, "altLabel": 1}) if col.name == "QC_label" else col
-        )
-
-        # Deduplicate URIs — keep prefLabel version if present
-        df_comb = df_comb.drop_duplicates(subset="uri", keep="first")
-
-        df_comb = df_comb.sort_values(
-            by="Distance",
-            ascending=True,
-        )
-
-        matches.extend(df_comb.to_dict(orient="records"))
-
-    # #  Final global sort on similarity
-    # if matches:
-    #     df_out = pd.DataFrame(matches).sort_values(by="Similarity", ascending=True)
-
-    return matches
-
-
-def add_visual_row_group(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add a 'Group' emoji/marker column based on changes in the 'query' column.
-    Works safely in st.data_editor (no styling applied).
-    """
-    query_change = df["query"].ne(df["query"].shift()).cumsum()
-    df = df.copy()
-    df["Group Marker"] = query_change.map(lambda x: "🔶" if x % 2 == 0 else "🔷") # other emoji options: ⬛⬜
-    # Optionally move marker column to the front
-    df.insert(0, " ", df.pop("Group Marker"))
-    return df
-
-def make_clickable_links(uris):
-    # Convert list of URIs into HTML links separated by commas
-    return ", ".join(f'<a href="{u}" target="_blank">{u}</a>' for u in uris)
-
 @st.cache_resource
 def load_file_from_url(url: str) -> ContextFile:
     response = requests.get(url)
@@ -845,7 +706,7 @@ else:
     st.markdown("### Manual variable descriptions")
     st.caption("Want some LLM power to help? keep scrolling down!")
 
-    #BUG: when there is a new dataset loaded. The old one keeps being presented here??
+
     meta_dict_description = st.session_state.get(meta_key)
     tab_labels = list(meta_dict_description.keys())
     tabs = st.tabs(tab_labels)
@@ -868,7 +729,6 @@ else:
                                                     overwrite='yes'
                                                     )
                 st.rerun() # Not uptimal, but necessary to update the edited df in session_state. Bug is know in streamlit community
-            #BUG: when description is generated with LLM, and you change something here. Some eternal loop is created!!!
 
     st.markdown("### Augmented variable descriptions")
     with st.expander("Need some LLM help?", expanded=False):
@@ -918,12 +778,40 @@ else:
                         )
                     )
 
-            # ✅ Clear uploader so its UI looks empty again
+            # Clear uploader so its UI looks empty again
             # UI is duplicated under st.markdown("### Context files")
             if not upload_key in st.session_state:
                 st.session_state["upload_key"] = 0
             st.session_state["upload_key"] += 1
             st.rerun()
+
+        # --- Webpage URL input ---
+        st.markdown("**Or add a webpage as context:**")
+        col_url, col_btn = st.columns([5, 1])
+        with col_url:
+            webpage_url = st.text_input("Webpage URL", placeholder="https://example.com/about", label_visibility="collapsed", key="webpage_url_input")
+        with col_btn:
+            add_webpage = st.button("Add", key="add_webpage_button")
+        if add_webpage and webpage_url.strip():
+            url_clean = webpage_url.strip()
+            page_name = urlparse(url_clean).netloc + urlparse(url_clean).path
+            if not any(f.name == page_name for f in st.session_state["context_files"]):
+                try:
+                    scraped = scrape_webpage_text(url_clean)
+                    st.session_state["context_files"].append(
+                        ContextFile(
+                            name=page_name,
+                            content=scraped.encode("utf-8"),
+                            mime_type="text/plain",
+                            source="webpage",
+                            ext="txt"
+                        )
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not fetch webpage: {e}")
+            else:
+                st.info("This webpage is already added.")
 
         
         st.markdown("### Context files")
@@ -935,7 +823,12 @@ else:
                 st.markdown(f"📄 **{f.name}**")
 
             with col2:
-                st.caption("🔗 Zenodo" if f.source == "url" else "⬆️ Uploaded")
+                if f.source == "url":
+                    st.caption("🔗 Zenodo")
+                elif f.source == "webpage":
+                    st.caption("🌐 Webpage")
+                else:
+                    st.caption("⬆️ Uploaded")
 
             with col3:
                 if st.button("❌", key=f"remove_{i}"):
@@ -985,6 +878,7 @@ else:
         placeholder_loaded_context = st.empty()
 
 
+
     if st.session_state["context_files"] or custom_context.strip():
         all_context_text = ""
         expanded_load_context = False if custom_context==suggested_text and not st.session_state["context_files"] else True
@@ -1009,7 +903,7 @@ else:
                                 # Add custom context to the combined text
                     
                 if custom_context.strip():
-                    key = f"context_text_freefield"
+                    key = f"context_text_freefield {len(custom_context)}"
                     updated_text = st.text_area(
                         f"Free text: [characters: {len(custom_context)}]",
                         value=custom_context,

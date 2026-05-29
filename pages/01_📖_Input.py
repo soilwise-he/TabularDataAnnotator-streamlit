@@ -1,3 +1,4 @@
+import ast
 import streamlit as st
 import pandas as pd
 import io
@@ -33,10 +34,10 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 # -------------------- Helper data and functions --------------------
 
-# !! in UoM procedure, it's hardcoded filtered on "numeric"
+# !! in UoM procedure, it's hardcoded filtered on "numeric" types
 # https://www.w3.org/TR/tabular-data-primer/?ref=stevenfirth.com#datatypes
 DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
-                     'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
+                     'dateTime', 'dateTimeStamp', 'decimal',
                      'integer', 'long', 'int', 'short', 'byte',
                      'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
                      'unsignedInt', 'unsignedShort', 'unsignedByte',
@@ -63,6 +64,9 @@ SESSION_RESET_KEYS = [
     "vocab_row_selection",
     "vocab_row_selection_status",
     "df_selection_keywords",
+    "_linked_site_df",
+    "_linked_obs_df",
+    "_linked_obs_filename",
 
 ]
 
@@ -114,14 +118,14 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
     than float() — handles E notation, %, ‰) and is_compatible_with_datatype for
     structural checks, then falls back to pandas for date/dateTime distinction.
 
-    Returns one of: 'integer', 'decimal', 'date', 'dateTime', 'time', 'boolean', 'string'.
+    Returns one of: 'integer', 'decimal', 'date', 'dateTime', 'time', 'boolean', 'json', 'string'.
     """
     series = s.dropna().astype(str).str.strip()
     if len(series) == 0:
         return "string"
     series = series.head(sample_size)
 
-    counts = {"integer": 0, "decimal": 0, "dateTime": 0, "date": 0, "time": 0, "boolean": 0}
+    counts = {"integer": 0, "decimal": 0, "dateTime": 0, "date": 0, "time": 0, "boolean": 0, "json": 0}
     total = 0
 
     for val in series:
@@ -150,6 +154,16 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
                 counts["boolean"] += 1
                 continue
 
+        # --- json (object or array) ---
+
+        if val.strip().startswith(('{', '[')):
+            try:
+                json.loads(val)
+                counts["json"] += 1
+                continue
+            except (ValueError, json.JSONDecodeError):
+                pass
+
         # --- date / dateTime / time via pandas (csvwlib delegates to dateutil anyway) ---
         if any(sep in val for sep in ['/', '-', '.', ':']):
             try:
@@ -175,7 +189,8 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
 
     THRESHOLD = 0.8
     # Order: most specific / least ambiguous first
-    for dt in ("integer", "decimal", "boolean", "dateTime", "date", "time"):
+
+    for dt in ("integer", "decimal", "boolean", "dateTime", "date", "time", "json"):
         if counts[dt] / total >= THRESHOLD:
             if dt == "integer" and counts["decimal"] > 0:
                 return "decimal"
@@ -383,7 +398,7 @@ def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
     for c in df.columns:
 
         
-        
+
         dtype = detect_csvw_datatype_from_series(df[c])
 
         Date_Time_format = detect_date_format_from_series(df[c]) if dtype in ("date", "dateTime", "time") else ""
@@ -392,10 +407,13 @@ def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
             "datatype": dtype,
             "dateTime format": Date_Time_format,
             "element": "",
-            "unit": "",
+            "concept": "",
+            "concept_uri": "",
+            "unit_symbol": "",
+            "unit_uri": "",
             "method": "",
             "description": "",
-            "element_uri": ""
+            "quantity kind_uri": "",
         })
 
     return pd.DataFrame(cols)
@@ -416,6 +434,7 @@ def read_csvBytes_with_sniffer(raw:bytes) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
     return df
 
+#TODO: outdated. Needs update to new metadata structure and merging logic.
 @st.cache_data()
 def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
     # Accept CSV or JSON (tableschema or csvw)
@@ -449,8 +468,8 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                         'description': f.get('description') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'element': f.get('title') or '',
-                        'element_uri': f.get('element_uri') or ''
+                        'concept': f.get('title') or '',
+                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             # CSVW style
@@ -463,8 +482,8 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                         'description': f.get('null') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'element': (f.get('titles') or [''])[0],
-                        'element_uri': f.get('element_uri') or ''
+                        'concept': (f.get('titles') or [''])[0],
+                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
@@ -549,6 +568,7 @@ def get_files_URL_from_Zenodo_id(record_id:int,extensions: Optional[Sequence[str
 def request_file_from_zenodo(url:str) -> tuple[requests.Response, str, str]:
     try:
         file_response_head = requests.head(url)
+        file_response_head
         file_response_head.raise_for_status()
     except Exception as e:
         st.error(f"Failed to read file {url} from Zenodo record: {e}")
@@ -724,7 +744,7 @@ st.markdown("""
 
 st.markdown(""" --- """)
 
-mode = st.radio("Input mode", options=["single CSV", "linked", "excel", "url - zenodo"], index=0, horizontal=True)
+mode = st.radio("Input mode", options=["single CSV", "linked", "excel", "url - zenodo"], index=0, horizontal=True, key='input_mode')
 
 
 ## Different methods to convey the information
@@ -741,9 +761,6 @@ uploaded_df = None
 site_df = None
 obs_df = None
 
-
-
-
 # File upload UI
 col1, col2 = st.columns([1, 1])
 
@@ -752,152 +769,182 @@ zipped_context_files = []
 filename_dict = dict()  # to keep track of original filenames for tabular data
 upload_tokens: list[str] = []
 url_input = ""
+_filename = None
+_record_id = None
+_uploaded = None
+_site_file = None
+_obs_file = None
+_excel_file = None
 
-
+# ---------- Phase 1: render widgets, collect tokens — no file I/O ----------
 with col1:
     st.markdown("**Import tabular data**")
     if mode == 'single CSV':
-        uploaded = st.file_uploader("Upload CSV file", type=['csv'], key='single_upload')
-        filename = uploaded.name if uploaded else None
-        if uploaded:
-            upload_tokens.append(f"csv:{uploaded.name}:{uploaded.size}")
+        _uploaded = st.file_uploader("Upload CSV file", type=['csv'], key='single_upload')
+        _filename = _uploaded.name if _uploaded else None
+        if _uploaded:
+            upload_tokens.append(f"csv:{_uploaded.name}:{_uploaded.size}")
+
+    elif mode == 'linked':
+        _site_file = st.file_uploader("Upload Sites CSV (locations)", type=['csv'], key='site_upload')
+        _obs_file = st.file_uploader("Upload Observations CSV", type=['csv'], key='obs_upload')
+        _filename = _obs_file.name if _obs_file else None
+        if _site_file:
+            upload_tokens.append(f"csv:{_site_file.name}:{_site_file.size}")
+        if _obs_file:
+            upload_tokens.append(f"csv:{_obs_file.name}:{_obs_file.size}")
+
+    elif mode == 'excel':
+        _excel_file = st.file_uploader("Upload Excel workbook", type=['xlsx', 'xls'], key='excel_upload')
+        _filename = _excel_file.name if _excel_file else None
+        if _excel_file:
+            upload_tokens.append(f"excel:{_excel_file.name}:{_excel_file.size}")
+
+    elif mode == 'url - zenodo':
+        url_input = st.text_input(
+            "Enter URL to zenodo records. (prefered format 'https://zenodo.org/records/{ID_number}')",
+            key='url_input',
+        )
+        if url_input:
             try:
-                raw = uploaded.getvalue()
+                _record_id = get_record_id_from_Zenodo_url(url_input)
+                upload_tokens.append(f"zenodo:{_record_id}")
+                # Keep the active cache key current so clear-on-new-input preserves the right entry
+                st.session_state["_active_zenodo_cache_key"] = f"_zenodo_ingest_cache_{_record_id}"
+            except ValueError as e:
+                st.error(str(e))
+
+    if mode != 'url - zenodo':
+        st.session_state["_active_zenodo_cache_key"] = None
+        st.session_state.pop("zenodo_context_files_url", None)
+        st.session_state.pop("zenodo_context_metadata", None)
+
+# ---------- Phase 2: signature check ----------
+has_active_input = bool(upload_tokens) or bool(url_input)
+current_input_signature = _build_input_signature(mode, upload_tokens, url_input)
+previous_input_signature = st.session_state.get("_input_signature")
+_need_processing = has_active_input and (previous_input_signature != current_input_signature)
+
+if _need_processing:
+    _clear_dependent_session_state_for_new_input()
+    st.session_state["_input_signature"] = current_input_signature
+elif "tabular_data_dict" in st.session_state:
+    # Signature unchanged or navigating back: skip all file I/O, restore from session state
+    tabular_dict = {k: df.copy() for k, df in st.session_state["tabular_data_dict"].items()}
+    filename_dict = dict(st.session_state.get("filename_dict", {}))
+    zipped_context_files = list(st.session_state.get("zenodo_context_files_from_zip", []))
+    if mode == 'linked':
+        site_df = st.session_state.get("_linked_site_df")
+        obs_df = st.session_state.get("_linked_obs_df")
+        if _filename is None:
+            _filename = st.session_state.get("_linked_obs_filename")
+
+# ---------- Phase 3: file I/O — only runs when input actually changed ----------
+if _need_processing:
+    if mode == 'single CSV':
+        if _uploaded:
+            try:
+                raw = _uploaded.getvalue()
                 uploaded_df = read_csvBytes_with_sniffer(raw)
-                tabular_dict[filename] = uploaded_df
-                filename_dict[filename] = filename
+                tabular_dict[_filename] = uploaded_df
+                filename_dict[_filename] = _filename
             except Exception as e:
                 st.error(f"Failed to read CSV: {e}")
 
     elif mode == 'linked':
-        site_file = st.file_uploader("Upload Sites CSV (locations)", type=['csv'], key='site_upload')
-        obs_file = st.file_uploader("Upload Observations CSV", type=['csv'], key='obs_upload')
-        filename = obs_file.name if obs_file else None
-        if site_file:
-            upload_tokens.append(f"csv:{site_file.name}:{site_file.size}")
+        if _site_file:
             try:
-                raw = site_file.getvalue()
+                raw = _site_file.getvalue()
                 site_df = read_csvBytes_with_sniffer(raw)
-                filename_dict[site_file.name] = site_file.name
+                filename_dict[_site_file.name] = _site_file.name
+                st.session_state["_linked_site_df"] = site_df
             except Exception as e:
                 st.error(f"Failed to read sites CSV: {e}")
-        if obs_file:
-            upload_tokens.append(f"csv:{obs_file.name}:{obs_file.size}")
+        if _obs_file:
             try:
-                raw = obs_file.getvalue()
+                raw = _obs_file.getvalue()
                 obs_df = read_csvBytes_with_sniffer(raw)
-                filename_dict[obs_file.name] = obs_file.name
+                filename_dict[_obs_file.name] = _obs_file.name
+                st.session_state["_linked_obs_df"] = obs_df
+                st.session_state["_linked_obs_filename"] = _obs_file.name
             except Exception as e:
                 st.error(f"Failed to read observations CSV: {e}")
 
     elif mode == 'excel':
-        excel_file = st.file_uploader("Upload Excel workbook", type=['xlsx', 'xls'], key='excel_upload')
-        filename = excel_file.name if excel_file else None
-        selected_sheet = None
-        if excel_file:
-            upload_tokens.append(f"excel:{excel_file.name}:{excel_file.size}")
+        if _excel_file:
             try:
-                df_dict = get_excel(excel_file)
+                df_dict = get_excel(_excel_file)
                 for sheet_name, df in df_dict.items():
-                    tabular_dict[f"{filename} | {sheet_name}"] = df
-                    filename_dict[f"{filename} | {sheet_name}"] = f"{filename}"
+                    tabular_dict[f"{_filename} | {sheet_name}"] = df
+                    filename_dict[f"{_filename} | {sheet_name}"] = _filename
             except Exception as e:
                 st.error(f"Failed to read Excel: {e}")
-    elif mode == 'url - zenodo':
-        url_input = st.text_input("Enter URL to zenodo records. (prefered format 'https://zenodo.org/records/{ID_number}')", key='url_input')
 
-        if url_input:
-            # PIN : Zenodo Test URLS
-            # https://zenodo.org/records/14034500 -> empty excel
-            # https://zenodo.org/records/14726493 -> csv
-            # https://zenodo.org/records/8083652 -> dubble excel
-            # https://zenodo.org/records/10028494 -> complex zip
-            # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
-            # https://zenodo.org/records/19177539 -> connected CSV's
-            #######################################################
-            record_id = get_record_id_from_Zenodo_url(url_input)
-            upload_tokens.append(f"zenodo:{record_id}")
+    elif mode == 'url - zenodo' and _record_id:
+        # PIN : Zenodo Test URLS
+        # https://zenodo.org/records/14034500 -> empty excel
+        # https://zenodo.org/records/14726493 -> csv
+        # https://zenodo.org/records/8083652 -> dubble excel
+        # https://zenodo.org/records/10028494 -> complex zip
+        # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
+        # https://zenodo.org/records/19177539 -> connected CSV's
+        #######################################################
+        zenodo_cache_key = f"_zenodo_ingest_cache_{_record_id}"
+        cached_zenodo = st.session_state.get(zenodo_cache_key)
+        if cached_zenodo is not None:
+            tabular_dict.update({k: v.copy() for k, v in cached_zenodo["tabular_dict"].items()})
+            filename_dict.update(dict(cached_zenodo["filename_dict"]))
+            st.session_state['zenodo_context_files_url'] = list(cached_zenodo["files_url_context"])
+            st.session_state['zenodo_context_metadata'] = dict(cached_zenodo["metadata_context"])
+            zipped_context_files.extend(list(cached_zenodo["zipped_context_files"]))
+        else:
+            filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
+            files_url_tabular = get_files_URL_from_Zenodo_id(_record_id, extensions=filtered_extensions_tabular)
 
-            zenodo_cache_key = f"_zenodo_ingest_cache_{record_id}"
-            st.session_state["_active_zenodo_cache_key"] = zenodo_cache_key
-            cached_zenodo = st.session_state.get(zenodo_cache_key)
-            if cached_zenodo is not None:
-                tabular_dict.update({k: v.copy() for k, v in cached_zenodo["tabular_dict"].items()})
-                filename_dict.update(dict(cached_zenodo["filename_dict"]))
-                st.session_state['zenodo_context_files_url'] = list(cached_zenodo["files_url_context"])
-                st.session_state['zenodo_context_metadata'] = dict(cached_zenodo["metadata_context"])
-                zipped_context_files.extend(list(cached_zenodo["zipped_context_files"]))
-            else:
-                # retrieve tabular datafiles based on record_id
-                filtered_extensions_tabular=['.csv','.xlsx','.xls']
-                files_url_tabular = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_tabular)
+            filtered_extensions_zip = ['.zip']
+            files_url_zip = get_files_URL_from_Zenodo_id(_record_id, extensions=filtered_extensions_zip)
 
-                # retrieve tabular datafiles based on record_id
-                filtered_extensions_zip=['.zip']
-                files_url_zip = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_zip)
+            filtered_extensions_context = ['.doc', '.docx', '.pdf', '.md', '.txt']
+            files_url_context = get_files_URL_from_Zenodo_id(_record_id, extensions=filtered_extensions_context)
+            st.session_state['zenodo_context_files_url'] = files_url_context
 
+            metadata_context_full = get_metadata_from_Zenodo_id(_record_id)
+            metadata_context = {k: metadata_context_full[k] for k in {"title", "description"} if k in metadata_context_full}
+            if "description" in metadata_context:
+                metadata_context["description"] = description_to_plain_text(metadata_context["description"])
+            st.session_state['zenodo_context_metadata'] = metadata_context
 
-                # retrieve context files based on record_id
-                filtered_extensions_context=['.doc','.docx','.pdf','.md', '.txt']
-                files_url_context = get_files_URL_from_Zenodo_id(record_id,extensions = filtered_extensions_context)
-                st.session_state['zenodo_context_files_url'] = files_url_context
-
-
-
-                # retrieve metadata and save in session state for later use in context
-                metadata_context_full = get_metadata_from_Zenodo_id(record_id)
-                metadata_context = {k: metadata_context_full[k] for k in {"title","description"} if k in metadata_context_full}
-                if "description" in metadata_context:
-                    metadata_context["description"] = description_to_plain_text(metadata_context["description"])
-                st.session_state['zenodo_context_metadata'] = metadata_context
-
-
-
-                for file_url in files_url_tabular:
-
-
-                    file_response,name_file, ext_file = request_file_from_zenodo(file_url)
-
-                    if ext_file in ['.xlsx','.xls']:
-                        bitesIO = io.BytesIO(file_response.content)
-                        bitesIO.name = name_file
-                        df_dict = get_excel(bitesIO)
-                        for sheet_name, df in df_dict.items():
-                            tabular_dict[f"{name_file} | {sheet_name}"] = df
-                            filename_dict[name_file] = file_url
-                    elif ext_file == '.csv':
-                        uploaded_df = read_csvBytes_with_sniffer(file_response.content)
-                        tabular_dict[name_file] = uploaded_df
+            for file_url in files_url_tabular:
+                file_response, name_file, ext_file = request_file_from_zenodo(file_url)
+                if ext_file in ['.xlsx', '.xls']:
+                    bitesIO = io.BytesIO(file_response.content)
+                    bitesIO.name = name_file
+                    df_dict = get_excel(bitesIO)
+                    for sheet_name, df in df_dict.items():
+                        tabular_dict[f"{name_file} | {sheet_name}"] = df
                         filename_dict[name_file] = file_url
-                for file_url in files_url_zip:
-                    st.write(f"diving into zip; {file_url}")
-                    process_zip_from_url(file_url,
-                                            tabular_dict,
-                                            zipped_context_files,
-                                            filename_dict,
-                                            tabular_exts=filtered_extensions_tabular,
-                                            context_exts=filtered_extensions_context)
+                elif ext_file == '.csv':
+                    uploaded_df = read_csvBytes_with_sniffer(file_response.content)
+                    tabular_dict[name_file] = uploaded_df
+                    filename_dict[name_file] = file_url
+            for file_url in files_url_zip:
+                st.write(f"diving into zip; {file_url}")
+                process_zip_from_url(file_url,
+                                        tabular_dict,
+                                        zipped_context_files,
+                                        filename_dict,
+                                        tabular_exts=filtered_extensions_tabular,
+                                        context_exts=filtered_extensions_context)
 
-                st.session_state[zenodo_cache_key] = {
-                    "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
-                    "filename_dict": dict(filename_dict),
-                    "zipped_context_files": list(zipped_context_files),
-                    "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
-                    "metadata_context": dict(st.session_state.get('zenodo_context_metadata', {})),
-                }
-    if mode != 'url - zenodo':
-        st.session_state["_active_zenodo_cache_key"] = None
+            st.session_state[zenodo_cache_key] = {
+                "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
+                "filename_dict": dict(filename_dict),
+                "zipped_context_files": list(zipped_context_files),
+                "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
+                "metadata_context": dict(st.session_state.get('zenodo_context_metadata', {})),
+            }
+
     st.session_state["zenodo_context_files_from_zip"] = zipped_context_files
-
-    if  mode != 'url - zenodo':
-        st.session_state.pop("zenodo_context_files_url", None)
-        st.session_state.pop("zenodo_context_metadata", None)
-
-current_input_signature = _build_input_signature(mode, upload_tokens, url_input)
-previous_input_signature = st.session_state.get("_input_signature")
-if previous_input_signature is not None and previous_input_signature != current_input_signature:
-    _clear_dependent_session_state_for_new_input()
-st.session_state["_input_signature"] = current_input_signature
 
 
 
@@ -913,15 +960,16 @@ if mode == 'linked' and site_df is not None and obs_df is not None:
     st.write("### Select linking columns")
     site_cols = list(site_df.columns)
     obs_cols = list(obs_df.columns)
-    site_id_col = st.selectbox("ID column (sites)", options=[''] + site_cols)
-    obs_fk_col = st.selectbox("Foreign key column (observations)", options=[''] + obs_cols)
+    site_id_col = st.selectbox("ID column (sites)", options=[''] + site_cols, key='site_id_col_select')
+    obs_fk_col = st.selectbox("Foreign key column (observations)", options=[''] + obs_cols, key='obs_fk_col_select')
     if site_id_col and obs_fk_col:
         st.write("Preview of linked join (left on observations -> sites):")
         try:
             merged = obs_df.merge(site_df, left_on=obs_fk_col, right_on=site_id_col, how='left', suffixes=('_obs', '_site'))
             st.dataframe(merged.head(5))
             uploaded_df = merged  # use merged for building metadata
-            tabular_dict[filename] = uploaded_df
+            if _filename:
+                tabular_dict[_filename] = uploaded_df
         except Exception as e:
             st.error(f"Failed to merge tables: {e}")
 
@@ -1048,6 +1096,43 @@ if tabular_dict:
             
             
 
+
+
+            meta_key = f"metadata_df"
+            if meta_key not in st.session_state:
+                st.session_state[meta_key] = {}
+
+
+            if key not in st.session_state[meta_key]: 
+                st.session_state[meta_key][key] = build_metadata_df_from_df(df)
+
+            if key not in st.session_state["primary_keys_guess"]:
+                st.session_state["primary_keys_guess"][key] = pick_primary_key(
+                    df.columns.tolist(), df.head(200).to_dict(orient='records')
+                )
+            primary_keys_guess = st.session_state["primary_keys_guess"][key]
+            pk_c1, pk_c2,_ = st.columns([2, 2, 6])
+            pk_c1.markdown("Select [primary key](https://en.wikipedia.org/wiki/Primary_key) column (if present)")
+            st.session_state["primary_keys"][key]=pk_c2.selectbox(
+                "primary key",
+                label_visibility = "collapsed",
+                options=[''] + df.columns.tolist(),
+                index=0 if primary_keys_guess is None else df.columns.get_loc(primary_keys_guess) + 1,
+                key=f"primary_key_select_{key}",
+                width=200,
+            )
+            
+            # Add primary key to metadata dataframe
+            primary_key_col = st.session_state["primary_keys"][key]
+            if primary_key_col:  # Only if a primary key was selected
+                if "primary key" not in st.session_state[meta_key][key].columns:
+                    st.session_state[meta_key][key]["primary key"] = False
+                st.session_state[meta_key][key]["primary key"] = st.session_state[meta_key][key]['name']== primary_key_col
+            else:
+                st.session_state[meta_key][key]["primary key"] = False
+
+
+            # Preview the dataframe
             try:
                 st.dataframe(df.head(5))
             except Exception as e:
@@ -1065,37 +1150,9 @@ if tabular_dict:
                 st.error(f"Error displaying dataframe: {e}")
                 continue
 
-            meta_key = f"metadata_df"
-            if meta_key not in st.session_state:
-                st.session_state[meta_key] = {}
 
 
-            if key not in st.session_state[meta_key]:
-                st.session_state[meta_key][key] = build_metadata_df_from_df(df)
-
-            if key not in st.session_state["primary_keys_guess"]:
-                st.session_state["primary_keys_guess"][key] = pick_primary_key(
-                    df.columns.tolist(), df.head(200).to_dict(orient='records')
-                )
-            primary_keys_guess = st.session_state["primary_keys_guess"][key]
-            st.session_state["primary_keys"][key]=st.selectbox(
-                "Select primary key column (if present)",
-                options=[''] + df.columns.tolist(),
-                index=0 if primary_keys_guess is None else df.columns.get_loc(primary_keys_guess) + 1,
-                key=f"primary_key_select_{key}",
-                width=200,
-            )
-            
-            # Add primary key to metadata dataframe
-            primary_key_col = st.session_state["primary_keys"][key]
-            if primary_key_col:  # Only if a primary key was selected
-                if "primary key" not in st.session_state[meta_key][key].columns:
-                    st.session_state[meta_key][key]["primary key"] = False
-                st.session_state[meta_key][key]["primary key"] = st.session_state[meta_key][key]['name']== primary_key_col
-            else:
-                st.session_state[meta_key][key]["primary key"] = False
-
-            st.markdown("#### Metadata")
+            st.markdown("#### Datatype")
             st.caption("Change the datatype and date format as needed.")
 
             original_metadata_df = st.session_state[meta_key][key]
@@ -1172,8 +1229,8 @@ if tabular_dict:
 
 
     st.session_state["tabular_data_dict"] = {key: df.copy() for key, df in tabular_dict.items()}
+    st.session_state["tabular_data_dict_preview"] = {key: df.copy().head(10) for key, df in tabular_dict.items()}
     
-
 
     if "filename_dict" not in st.session_state:
             st.session_state["filename_dict"] = {}
@@ -1188,8 +1245,7 @@ if tabular_dict:
         # st.info("""Metadata has been generated based on the uploaded dataset. \n \n ⏭️ You're ready for the next step""", icon="✅")
     st.info("""Metadata has been generated based on the uploaded dataset. You can still upload previous work on metadata and apply it to the generated metadata. \n \n ⏭️ You're ready for the next step on the following page""", icon="✅")
 
-    st.markdown("## DEBUG OUTPUT")
-    st.json(st.session_state[meta_key])
+
 
 # -------------------- reach us --------------------
 add_Soilwise_contact_sidebar()

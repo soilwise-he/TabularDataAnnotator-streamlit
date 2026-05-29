@@ -369,8 +369,6 @@ def build_qudt_lookup(qudt_reference: pd.DataFrame) -> Dict[str, Dict[str, List[
     unit_lookup: Dict[str, List[str]] = {}
     kind_lookup: Dict[str, List[str]] = {}
 
-    #TODO: explore also use of [conversionMultiplier,baseUnit,UnitOfSystem,applicableSystem]
-
     for _, row in qudt_reference.iterrows():
         unit_uri = row.get("unit")
         kind_uri = row.get("QuantityKind")
@@ -626,6 +624,7 @@ def translate_QUDT(df: pd.DataFrame, qudt_reference: pd.DataFrame) -> pd.DataFra
 
 st.title("📐 Unit of Measurement Annotation")
 
+
 st.markdown("""
 This page helps you annotate unit of measurements for numeric variables in your dataset.
 The tool provides:
@@ -634,6 +633,9 @@ The tool provides:
 - Search capability to browse QUDT units and quantity kinds
 - Manual selection and confirmation interface
 """)
+
+# Scroll anchor
+st.markdown('<a id="qudt-start-anchor"></a>', unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -660,6 +662,8 @@ if qudt_df.empty:
     st.error("❌ QUDT data is not available. Cannot proceed with unit annotation.")
     st.stop()
 
+
+
 # Create one tab per key
 tab_labels = list(st.session_state[meta_key].keys())
 tabs = st.tabs(tab_labels)
@@ -674,7 +678,7 @@ for tab, key in zip(tabs, tab_labels):
         
         # Get numeric columns (CSVW types for which a UoM is meaningful)
         meta_df = st.session_state[meta_key][key]
-        numeric_cols = meta_df[meta_df["datatype"].isin(DATA_TYPE_OPTIONS_UoM)]
+        numeric_cols = meta_df[meta_df["datatype"].isin(DATA_TYPE_OPTIONS_UoM) | meta_df["element"].isin(["sosa:observedProperty"])]
         
         if numeric_cols.empty:
             st.info(f"ℹ️ No numeric variables found in **{key}**. Only numeric variables require unit annotations.")
@@ -720,12 +724,12 @@ for tab, key in zip(tabs, tab_labels):
             guesses_df = pd.DataFrame(guesses_summary)
             guesses_qudt_df = translate_QUDT(guesses_df, qudt_df)
 
-            with st.expander("🛠️ Debug QUDT guesses", expanded=False):
-                st.markdown("#### Raw guesses")
-                st.dataframe(guesses_df, width='stretch')
+            # with st.expander("🛠️ Debug QUDT guesses", expanded=False):
+            #     st.markdown("#### Raw guesses")
+            #     st.dataframe(guesses_df, width='stretch')
 
-                st.markdown("#### QUDT-translated guesses")
-                st.dataframe(guesses_qudt_df, width='stretch')
+            #     st.markdown("#### QUDT-translated guesses")
+            #     st.dataframe(guesses_qudt_df, width='stretch')
 
         else:
             guesses_qudt_df = pd.DataFrame()
@@ -736,14 +740,17 @@ for tab, key in zip(tabs, tab_labels):
         kind_uri_to_display = dict(zip(kind_catalog["QuantityKind"], kind_catalog["display"]))
         display_to_uri = {v: k for k, v in kind_uri_to_display.items()}
 
+
+
         # Create a section for each variable to identify suitable quantity kinds and units
         for _, row in numeric_cols.iterrows():
             col_expander, col_feedback = st.columns([7,1])
             with col_expander:
                 var_name = row["name"]
+                var_description = row["description"] if "description" in row else row["name"]
 
                 with st.expander(f"📊 {var_name}", expanded=False):
-
+                    st.markdown(f"**Description:** {var_description}")
                     suggested_kind_uris = get_suggested_quantity_kinds_for_variable(guesses_qudt_df, var_name)
                     suggested_unit_uris = get_suggested_units_for_variable(guesses_qudt_df, var_name)
                     
@@ -980,10 +987,12 @@ for key, metadata in st.session_state["uom_selections"].items():
             for var_name, selection in metadata.items()
             if var_name not in pending_by_var or pending_by_var.get(var_name) == "approved"
         }
+        
         if approved_selections:
-            metadata_df = pd.DataFrame(approved_selections).T.reset_index().rename(columns={"index": "name"})
-            export_cols = ["name", "unit"]
 
+            metadata_df = pd.DataFrame(approved_selections).T.reset_index().rename(columns={"index": "name"})
+            export_cols = ["name", "unit","symbol","QuantityKind"]
+            
             # Merge manual conversion values for approved variables
             manual_conv = st.session_state.get("uom_manual_conversion", {}).get(key, {})
             multipliers = {}
@@ -993,7 +1002,7 @@ for key, metadata in st.session_state["uom_selections"].items():
                 if conv:
                     multipliers[vn] = conv["multiplier"]
                     offsets[vn] = conv["offset"]
-
+            
             if multipliers:
                 metadata_df["conversionMultiplier"] = metadata_df["name"].map(multipliers)
                 export_cols.append("conversionMultiplier")
@@ -1001,7 +1010,17 @@ for key, metadata in st.session_state["uom_selections"].items():
                 metadata_df["conversionOffset"] = metadata_df["name"].map(offsets)
                 export_cols.append("conversionOffset")
 
-            uom_selections_export[key] = metadata_df[export_cols]
+            uom_selections_export[key] = metadata_df[export_cols].rename(columns={
+                "unit": "unit_uri",
+                "symbol": "unit_symbol",
+                "QuantityKind": "quantity kind_uri"
+            })
+
+# Anchor link to scroll back to the top of the matching section
+st.markdown(
+    '<a href="#qudt-start-anchor" style="text-decoration:none;">⬆ Back to top</a>',
+    unsafe_allow_html=True,
+)
 
 st.session_state['metadata_df'] = apply_new_metadata_info(uom_selections_export, st.session_state['metadata_df'], overwrite='yes')
 
@@ -1020,7 +1039,6 @@ for tab, key in zip(tabs_selection, tab_labels):
 
         # Summary of selections
         st.markdown("### 📋 Summary of Selections")
-        
         if key in st.session_state["uom_selections"] and st.session_state["uom_selections"][key]:
             summary_data = []
             for var_name, selection in st.session_state["uom_selections"][key].items():

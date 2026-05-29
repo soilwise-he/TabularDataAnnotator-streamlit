@@ -86,8 +86,8 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                         'description': f.get('description') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'element': f.get('title') or '',
-                        'element_uri': f.get('element_uri') or ''
+                        'concept': f.get('title') or '',
+                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             # CSVW style
@@ -100,8 +100,8 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                         'description': f.get('null') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'element': (f.get('titles') or [''])[0],
-                        'element_uri': f.get('element_uri') or ''
+                        'concept': (f.get('titles') or [''])[0],
+                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
@@ -303,7 +303,7 @@ def generate_descriptions_with_LLM(var_list: List[str], context: str, human_desc
 
 @st.cache_data(show_spinner=False)
 def load_sentence_model(modelname="all-MiniLM-L6-v2"):
-    with st.spinner(f"🔄 Loading embedding model '{modelname}'... This may take a few seconds."):
+    with st.spinner(f"🔄 Loading embedding model '{modelname}'... This may take some time."):
         from sentence_transformers import SentenceTransformer # Heavy loader
         model = SentenceTransformer(modelname)
     return model
@@ -612,7 +612,7 @@ def _render_vocab_tab(key):
             with col_k:
                 k_nearest_key = f"k_nearest_{key}_{query}"
                 k_nearest = st.number_input(
-                    "\# of suggestions",
+                    " \# of suggestions",
                     min_value=1, max_value=min(50, len(hits_all)),
                     value=min(5, len(hits_all)),
                     key=k_nearest_key,
@@ -714,9 +714,9 @@ def _render_vocab_tab(key):
             if custom_uri:
                 all_selected_rows.append({
                     "query": query,
-                    "label": "custom",
+                    "label": "",
                     "uri": custom_uri,
-                    "source": "custom",
+                    "source": "manual",
                     "id": f"{query}__custom",
                     "Distance": 0.0,
                 })
@@ -730,6 +730,8 @@ def _render_vocab_tab(key):
         unsafe_allow_html=True,
     )
     
+
+
     # --- Summary of selections ---
     unique_queries = query_list
 
@@ -754,10 +756,12 @@ def _render_vocab_tab(key):
             })
             summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
 
-        summary_df["element_uri"] = summary_df.apply(
-            lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
-            axis=1,
-        )
+        # summary_df["concept_uri"] = summary_df.apply(
+        #     lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
+        #     axis=1,
+        # )
+        summary_df["concept_uri"] = summary_df["uri"].apply(lambda x: x[0] if x else "")
+
         summary_df["query"] = pd.Categorical(
             summary_df["query"], categories=unique_queries, ordered=True
         )
@@ -766,10 +770,14 @@ def _render_vocab_tab(key):
         summary_df["uri"] = summary_df["uri"].apply(lambda x: " || ".join(x))
         st.dataframe(
             summary_df,
-            column_config={"uri": st.column_config.LinkColumn()},
+            column_config={
+                "query": st.column_config.TextColumn(label="variable"),
+                "uri": st.column_config.LinkColumn(),
+                "concept_uri": None,
+            },
         )
 
-        summary_df = summary_df.rename(columns={"query": "name", "label": "element"})
+        summary_df = summary_df.rename(columns={"query": "name", "label": "concept"})
         st.session_state['metadata_df'] = apply_new_metadata_info(
             {key: summary_df}, st.session_state['metadata_df'], overwrite='yes_incl_blanks'
         )
@@ -777,14 +785,32 @@ def _render_vocab_tab(key):
     else:
         st.info("No rows selected.")
 
+    # Propagate selection changes to the full page (outside this fragment).
+    # Hash the current selections; only trigger an app-level rerun when something changed
+    # to avoid an infinite rerun loop.
+    _sel_hash = hashlib.md5(
+        json.dumps(all_selected_rows, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    _prev_hash_key = f"_sel_hash_{key}"
+    if st.session_state.get(_prev_hash_key) != _sel_hash:
+        st.session_state[_prev_hash_key] = _sel_hash
+        st.rerun(scope="app")
+
 
 # PIN -------------------- UI --------------------
 st.title("🕵️ STEP 3 : Keyword Matching")
 
 st.markdown("""
-            For .
-            Later in the app, there is an option to augment the information, making use of an LLM. Also in that case, only the variable names and the context text (if you choose to upload some) will be used.
-            """)
+This step links your column names to standardised vocabulary terms from scientific thesauri (e.g. ANSIS, AGROVOC, QUDT).
+
+**How it works:**
+1. Select the vocabulary **sources** you want to select from, this can also be adapted later.
+2. Click **Find Vocabulary Terms In Thesaurus**. The tool uses a semantic embedding model to find the closest matching terms for each variable.
+3. For each variable, review the suggested matches and pick the best one (or enter a custom URI).
+
+
+> ⚠️ **Important:** Variable descriptions (added in Step 2) are practically essential for good matching. Short or cryptic column names alone are rarely enough. The model blends the variable name *and* its description when searching, and without a description the results are often too generic to be useful.
+""")
 
 st.markdown(""" --- """)
 
@@ -826,13 +852,19 @@ else:
 
     if st.button("Find Vocabulary Terms In Thesaury"):
 
+        _EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property"}
 
         for key, meta_df in meta_dict.items():
+            meta_df_for_matching = meta_df
+            if "element" in meta_df.columns:
+                # Skip matching for columns already typed as FOI or Attribute.
+                element_values = meta_df["element"].astype(str).str.strip()
+                meta_df_for_matching = meta_df[~element_values.isin(_EXCLUDED_ELEMENTS)]
 
-            #TODO: investigate how to filter voc provider. READ; https://github.com/Undertone0809/langchain/blob/patch-duckduckgo/docs/modules/indexes/vectorstores/examples/faiss.ipynb
+            
             with st.spinner(f"🔎 Finding nearest vocabulary terms - {key}..."):
                 raw_result_listdict = find_nearest_vocab(
-                    meta_df,                         # dataframe with searchterm. necesarry columns; ["Variable", "Description"]
+                    meta_df_for_matching,             # dataframe with searchterm. necesarry columns; ["Variable", "Description"]
                     _index_lib=index_vocabs,          # FAISS index
                     meta_data_dict=dict_vocabs,      # mapping dict
                     k_nearest=50
@@ -939,7 +971,7 @@ else:
 
 
 
-    st.divider()
+    
 
     st.markdown("#### Current state of your metadata table:")
 
@@ -949,15 +981,8 @@ else:
     error_handling_tabs = st.empty()
     error_tabs = []
 
-    total_size = 0
-    descriptions_completed = 0
-
     for tab, key in zip(tabs, tab_labels):
         df = st.session_state[meta_key][key]
-        
-        total_size=+len(df)
-        count_completed = df["description"].notna() & (df["description"] != "")
-        descriptions_completed=+ count_completed.sum()
         with tab:
             st.dataframe(st.session_state[meta_key][key])
 

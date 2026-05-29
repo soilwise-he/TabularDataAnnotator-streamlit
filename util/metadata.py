@@ -17,7 +17,10 @@ def _merge_metadata_rows(
             continue
 
         idx = md.index[md["name"] == name][0]
-        for col in ["datatype","dateTime format", "element", "unit", "method", "description", "element_uri", "conversionMultiplier", "conversionOffset"]:
+        
+        #TODO: delete fixed column list if no errors occur.
+        #for col in ["datatype","dateTime format", "element", "concept", "unit", "method", "description", "concept_uri", "conversionMultiplier", "conversionOffset"]:
+        for col in md.columns:
             # Ensure column exists in the target DataFrame before writing.
             if col not in md.columns:
                 md[col] = None
@@ -58,9 +61,6 @@ def apply_new_metadata_info(
         else:
             st.write(f"⚠️ Warning: Metadata for key '{key}' is not in a recognized format (dict or DataFrame). Skipping.")
             continue  # Skip if metadata is neither a dict nor a DataFrame
-
-        if key not in md_dict:
-            continue
 
         md_dict[key] = _merge_metadata_rows(metadata_df, md_dict[key], overwrite)
 

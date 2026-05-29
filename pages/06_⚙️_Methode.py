@@ -13,6 +13,8 @@ add_Soilwise_logo()
 add_clear_cache_button(key_prefix="methods_page")
 
 meta_key = "metadata_df"
+#_EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property"}
+_INCLUDE_ELEMENTS = {"sosa:observedProperty"}
 
 
 ISO_PATTERN = re.compile(r"\bISO\s*[A-Z]*\s*\d+(?:-\d+)?(?::\d{4})?\b", re.IGNORECASE)
@@ -144,6 +146,22 @@ def find_var_column(
 
 	return best_column, best_overlap
 
+
+def _order_by_metadata_names(df: pd.DataFrame, ordered_names: list[str]) -> pd.DataFrame:
+	"""Keep rows aligned with the original metadata variable order."""
+	if df is None or df.empty or "name" not in df.columns:
+		return df
+
+	name_order = {
+		_to_text(name).strip(): idx
+		for idx, name in enumerate(ordered_names)
+	}
+
+	ordered_df = df.copy()
+	ordered_df["_meta_order"] = ordered_df["name"].map(lambda v: name_order.get(_to_text(v).strip(), 10**9))
+	ordered_df = ordered_df.sort_values(by="_meta_order", kind="stable").drop(columns=["_meta_order"])
+	return ordered_df.reset_index(drop=True)
+
 @st.cache_resource()
 def _ensure_method_review_columns(df: pd.DataFrame) -> pd.DataFrame:
 	expected_columns = [
@@ -203,6 +221,7 @@ def _ensure_method_review_columns(df: pd.DataFrame) -> pd.DataFrame:
 			out.at[idx, "other_url_reference"] = _first_match(searchable_text, URL_PATTERN)
 
 	return out
+
 def extracted_reference_methode_from_string(text: str) -> tuple[str, str]:
 	"""Extracts a reference methode from the given text and identifies its type (ISO, CEN, DOI, URL, STRING or EMPTY)."""
 
@@ -229,6 +248,8 @@ st.markdown(
 Review AI-extracted methods and curate a single final reference for each variable.
 
 The reference field stays editable, and the badge next to it shows whether the current value looks like ISO, CEN, DOI, URL, or free text.
+
+☝️ HINT: If the method information is available in a column, leave this column in the 'Unsorted' bucket on the 'Column Sorting' page and this wil come available as a selection for each variable here. 
 """
 )
 
@@ -251,12 +272,21 @@ tabs = st.tabs(tab_labels)
 
 for tab, table_key in zip(tabs, tab_labels):
 	with tab:
+		table_meta_df = st.session_state[meta_key].get(table_key, pd.DataFrame())
+		ordered_meta_names = table_meta_df["name"].tolist() if "name" in table_meta_df.columns else []
+		excluded_names: set[str] = set()
+		if not table_meta_df.empty and {"name", "element"}.issubset(table_meta_df.columns):
+			element_values = table_meta_df["element"].astype(str).str.strip()
+			excluded_names = set(
+				table_meta_df.loc[~element_values.isin(_INCLUDE_ELEMENTS), "name"].map(_to_text).str.strip()
+			)
 
 		# First fill the table with augmentations from LLM extraction and Ansis vocab matching
 		if table_key not in st.session_state["method_review_tables"]:
-			if "df_selection_keywords" in st.session_state: 
+			if "df_selection_keywords" in st.session_state and not st.session_state["df_selection_keywords"].get(table_key, pd.DataFrame()).empty: 
 				# Identifying headers matched to Ansis vocab
 				df_selection_keywords = st.session_state["df_selection_keywords"].get(table_key, pd.DataFrame())
+
 				df_selection_keywords_Ansis = df_selection_keywords[df_selection_keywords["source"] == "Ansis"]
 				query_uri_mapping_Ansis_TableKey = {}
 				if {"query", "uri"}.issubset(df_selection_keywords_Ansis.columns):
@@ -266,6 +296,7 @@ for tab, table_key in zip(tabs, tab_labels):
 							uri=df_selection_keywords_Ansis["uri"].map(_to_text).str.strip(),
 						)
 						.query("query != '' and uri != ''")
+						.loc[lambda d: ~d["query"].isin(excluded_names)]
 						.drop_duplicates(subset=["query"], keep="first")
 						.set_index("query")["uri"]
 						.to_dict()
@@ -277,11 +308,16 @@ for tab, table_key in zip(tabs, tab_labels):
 				})
 			else:
 				st.session_state["method_review_tables"][table_key] = pd.DataFrame(columns=["name", "reference", "kind"])
-
+			
+			
 			if method_tables:
 				## Ensure header column is named "name" for better matching with metadata_df
 				AI_guess_methode_df = method_tables.get(table_key, pd.DataFrame())
-				meta_names = st.session_state[meta_key][table_key]["name"].tolist()
+				meta_names = [
+					name
+					for name in st.session_state[meta_key][table_key]["name"].tolist()
+					if _to_text(name).strip() not in excluded_names
+				]
 				matched_column = "name" if "name" in AI_guess_methode_df.columns else None
 				overlap_ratio = 1.0 if matched_column else 0.0
 				if matched_column is None:
@@ -300,9 +336,12 @@ for tab, table_key in zip(tabs, tab_labels):
 				rows_to_add = []
 				for idx, row in AI_guess_methode_df.iterrows():
 					name_value = row.get("name")
+					name_value_text = _to_text(name_value).strip()
+					if name_value_text in excluded_names:
+						continue
 
 					# prioritize Ansis vocab matches
-					if "df_selection_keywords" in st.session_state and (not name_value or name_value in query_uri_mapping_Ansis_TableKey.keys()): 
+					if "df_selection_keywords" in st.session_state and (not name_value_text or name_value_text in query_uri_mapping_Ansis_TableKey.keys()): 
 						continue
 					
 					context_info = " | ".join([f"{col}: {_to_text(row.get(col, '')).strip()}" for col in cols_info])
@@ -328,8 +367,28 @@ for tab, table_key in zip(tabs, tab_labels):
 						ignore_index=True,
 					)
 
+			# Keep merged rows in the same order as metadata names.
+			st.session_state["method_review_tables"][table_key] = _order_by_metadata_names(
+				st.session_state["method_review_tables"][table_key],
+				ordered_meta_names,
+			)
+
+		# Unsorted columns available for use as a method (procedure) column
+		unsorted_cols: list[str] = (
+			st.session_state.get("column_buckets", {})
+			.get(table_key, {})
+			.get("Unsorted", [])
+		)
+
 		st.caption("Inspect and edit the method details. The reference field is the final value that will be stored.")
 		current_df = st.session_state["method_review_tables"][table_key].reset_index(drop=True)
+
+		current_df = _order_by_metadata_names(current_df, ordered_meta_names)
+		#BUG: can't handle empty dataframe with empty rows?
+		if "name" in current_df.columns:
+			current_df = current_df[
+				~current_df["name"].map(_to_text).str.strip().isin(excluded_names)
+			].reset_index(drop=True)
 
 		edited_rows = []
 
@@ -345,36 +404,90 @@ for tab, table_key in zip(tabs, tab_labels):
 				label_visibility="collapsed",
 			)
 
+			# Optional: pick an Unsorted column as the procedure column
+			previous_method_col = _to_text(row.get("method_column", "")).strip()
+			if unsorted_cols:
+				method_col_options = ["-"] + unsorted_cols
+				default_idx = (
+					method_col_options.index(previous_method_col)
+					if previous_method_col in method_col_options
+					else 0
+				)
+				input_col.space("medium")
+				selected_method_col = input_col.selectbox(
+					"Or select a column with method information:",
+					options=method_col_options,
+					index=default_idx,
+					key=f"method_col_{table_key}_{idx}",
+					help="An **unsorted column** that holds flexible methode information for the observed property can be chosen here.",
+				)
+				if selected_method_col == "-":
+					selected_method_col = ""
+			else:
+				selected_method_col = ""
+
 			extracted_reference, kind = extracted_reference_methode_from_string(reference)
 
 			if kind == "EMPTY" and reference.strip():
 				extracted_reference = reference
 				kind = "STRING" if _to_text(extracted_reference).strip() else "EMPTY"
 
-			result_col.write(f"**Extracted Reference:** {extracted_reference}")
-			result_col.badge(
-				REFERENCE_TYPE_STYLES[kind]["label"],
-				color=REFERENCE_TYPE_STYLES[kind]["color"],
-				icon=REFERENCE_TYPE_STYLES[kind]["icon"],
-			)
+
+			if not selected_method_col:
+				result_col.write(f"**Extracted Reference:** {extracted_reference}")
+				result_col.badge(
+					REFERENCE_TYPE_STYLES[kind]["label"],
+					color=REFERENCE_TYPE_STYLES[kind]["color"],
+					icon=REFERENCE_TYPE_STYLES[kind]["icon"],
+				)
+
+			else:
+				result_col.space(110)
+				result_col.info(
+					f"Procedure column: **{selected_method_col}**",
+					icon=":material/settings:",
+				)
+
 
 			edited_rows.append({
 				"name": row["name"],
 				"reference": extracted_reference,
-				"method": extracted_reference,
+				"method": f"#[{selected_method_col}]" if selected_method_col else extracted_reference,
 				"kind": kind,
+				"method_column": selected_method_col,
 			})
 			st.divider()
 		st.session_state["method_review_tables"][table_key] = pd.DataFrame(edited_rows)
 
 
+# Apply method/reference — drop method_column so it is not written to the metadata schema.
+apply_tables = {
+	key: df.drop(columns=["method_column"], errors="ignore")
+	for key, df in st.session_state["method_review_tables"].items()
+}
 st.session_state[meta_key] = apply_new_metadata_info(
-		st.session_state["method_review_tables"],
+		apply_tables,
 		st.session_state[meta_key],
 		overwrite="yes_incl_blanks",
 	)
 
-st.divider()
+# For rows where a procedure column was chosen, write sosa:Procedure to the element field.
+for _tbl_key, _review_df in st.session_state["method_review_tables"].items():
+	if "method_column" not in _review_df.columns:
+		continue
+	_meta_df = st.session_state[meta_key].get(_tbl_key)
+	if _meta_df is None or "element" not in _meta_df.columns:
+		continue
+	for _, _rev_row in _review_df.iterrows():
+		_method_col_val = _to_text(_rev_row.get("method_column", "")).strip()
+		if not _method_col_val:
+			continue
+		_mask = _meta_df["name"].map(_to_text).str.strip() == _method_col_val
+		if _mask.any():
+			_meta_df.loc[_mask, "element"] = "sosa:Procedure"
+	st.session_state[meta_key][_tbl_key] = _meta_df
+
+
 st.markdown("#### Current metadata table")
 
 meta_tabs = st.tabs(list(st.session_state[meta_key].keys()))

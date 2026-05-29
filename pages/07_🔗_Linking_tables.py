@@ -225,7 +225,7 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 			"reason": "",
 		}
 
-		profile_started_at = perf_counter() #DEBUG
+		profile_started_at = perf_counter() #debug
 		left_profiles = {
 			column: _column_profile(left_df, column)
 			for column in table_columns[left_table]
@@ -234,9 +234,9 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 			column: _column_profile(right_df, column)
 			for column in table_columns[right_table]
 		}
-		profile_elapsed = perf_counter() - profile_started_at #DEBUG
+		profile_elapsed = perf_counter() - profile_started_at #debug
 
-		value_set_started_at = perf_counter() #DEBUG
+		value_set_started_at = perf_counter() #debug
 		left_value_sets = {
 			column: _column_value_set(left_df, column)
 			for column in table_columns[left_table]
@@ -245,9 +245,9 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 			column: _column_value_set(right_df, column)
 			for column in table_columns[right_table]
 		}
-		value_set_elapsed = perf_counter() - value_set_started_at #DEBUG
+		value_set_elapsed = perf_counter() - value_set_started_at #debug
 
-		scoring_started_at = perf_counter() #DEBUG
+		scoring_started_at = perf_counter() #debug
 		for left_column in table_columns[left_table]:
 			left_profile = left_profiles[left_column]
 			for right_column in table_columns[right_table]:
@@ -280,8 +280,8 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 					"score": pair_score,
 					"reason": ", ".join(reasons),
 				}
-		scoring_elapsed = perf_counter() - scoring_started_at #DEBUG
-		total_elapsed = perf_counter() - started_at #DEBUG
+		scoring_elapsed = perf_counter() - scoring_started_at #debug
+		total_elapsed = perf_counter() - started_at #debug
 
 		if best_suggestion["score"] < 0.0:
 			return {
@@ -290,7 +290,7 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 				"relation": "not linked",
 				"score": 0.0,
 				"reason": "",
-				"timing": { #DEBUG
+				"timing": { #debug
 					"profile_seconds": round(profile_elapsed, 3),
 					"value_set_seconds": round(value_set_elapsed, 3),
 					"scoring_seconds": round(scoring_elapsed, 3),
@@ -298,7 +298,7 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 				},
 			}
 
-		best_suggestion["timing"] = { #DEBUG
+		best_suggestion["timing"] = { #debug
 			"profile_seconds": round(profile_elapsed, 3),
 			"value_set_seconds": round(value_set_elapsed, 3),
 			"scoring_seconds": round(scoring_elapsed, 3),
@@ -342,7 +342,22 @@ if len(table_keys) < 2:
 	st.info("Only one table detected. Upload multiple tables to configure linking relationships.")
 	st.stop()
 
-table_columns = {table_key: _get_table_columns(metadata_dict[table_key]) for table_key in table_keys}
+FOI_ID_BUCKET = "Feature of Interest (FOI) - ID"
+column_buckets = st.session_state.get("column_buckets", {})
+
+table_columns = {
+	table_key: column_buckets.get(table_key, {}).get(FOI_ID_BUCKET, [])
+	for table_key in table_keys
+}
+
+if not any(table_columns.values()):
+	st.info(
+		"No columns are marked as **Feature of Interest (FOI) - ID** yet. "
+		"Go to the **Column Sorting** page and drag at least one column into the "
+		"*Feature of Interest (FOI) - ID* bucket for each table that you want to link."
+	)
+	st.stop()
+
 table_pairs = list(itertools.combinations(table_keys, 2))
 
 if "table_relationships" not in st.session_state:
@@ -354,14 +369,27 @@ for left_table, right_table in table_pairs:
 	stored_relationship = st.session_state["table_relationships"].get(pair_key, {})
 
 	suggested_link = _find_table_relationships(left_table, right_table, table_columns, data_dict)
-	st.write(suggested_link["timing"]) # DEBUG
+	#st.write(suggested_link["timing"]) # debug speed
 	default_relation = stored_relationship.get("relation", suggested_link["relation"])
-	default_left_id = stored_relationship.get("left_id", suggested_link["left_id"])
-	default_right_id = stored_relationship.get("right_id", suggested_link["right_id"])
+	# Use last_left_id/last_right_id so the selection survives a round-trip through "not linked"
+	default_left_id = stored_relationship.get("last_left_id") or stored_relationship.get("left_id") or suggested_link["left_id"]
+	default_right_id = stored_relationship.get("last_right_id") or stored_relationship.get("right_id") or suggested_link["right_id"]
 
 	with st.container(border=True):
 
 		header_left, header_mid, header_right = st.columns([5, 1, 5])
+
+		if not table_columns[left_table] or not table_columns[right_table]:
+			missing = [t for t in (left_table, right_table) if not table_columns[t]]
+			header_left.markdown(f"#### {left_table}")
+			header_right.markdown(f"#### {right_table}")
+			st.info(
+				f"No columns are marked as **Feature of Interest (FOI) - ID** for "
+				f"{', '.join(missing)}. "
+				"Go to the **Column Sorting** page and assign at least one column to the "
+				"*Feature of Interest (FOI) - ID* bucket before linking these tables."
+			)
+			continue
 
 		relation = st.selectbox(
 			"Relation",
@@ -380,48 +408,53 @@ for left_table, right_table in table_pairs:
 		)
 		header_right.markdown(f"#### {right_table}")
 
-		left_col, arrow_col, right_col = st.columns([5, 1, 5])
-		left_id = left_col.selectbox(
-			"Left id",
-			options=[""] + table_columns[left_table],
-			index=([""] + table_columns[left_table]).index(
-				default_left_id
-			)
-			if default_left_id in ([""] + table_columns[left_table])
-			else 0,
-			key=f"left_id_{pair_key}",
-		)
-		arrow_col.markdown(
-			f"<div style='text-align:center;padding-top:2rem;font-weight:700;'>{relation_arrow}</div>",
-			unsafe_allow_html=True,
-		)
-		right_id = right_col.selectbox(
-			"Right id",
-			options=[""] + table_columns[right_table],
-			index=([""] + table_columns[right_table]).index(
-				default_right_id
-			)
-			if default_right_id in ([""] + table_columns[right_table])
-			else 0,
-			key=f"right_id_{pair_key}",
-		)
 
-		if suggested_link["left_id"] and suggested_link["right_id"]:
+		if relation == "not linked":
+			left_id = ""
+			right_id = ""
+		else:
+			left_col, arrow_col, right_col = st.columns([5, 1, 5])
+			left_id = left_col.selectbox(
+				"Left id",
+				options=[""] + table_columns[left_table],
+				index=([""] + table_columns[left_table]).index(
+					default_left_id
+				)
+				if default_left_id in ([""] + table_columns[left_table])
+				else 0,
+				key=f"left_id_{pair_key}",
+			)
+			arrow_col.markdown(
+				f"<div style='text-align:center;padding-top:2rem;font-weight:700;'>{relation_arrow}</div>",
+				unsafe_allow_html=True,
+			)
+			right_id = right_col.selectbox(
+				"Right id",
+				options=[""] + table_columns[right_table],
+				index=([""] + table_columns[right_table]).index(
+					default_right_id
+				)
+				if default_right_id in ([""] + table_columns[right_table])
+				else 0,
+				key=f"right_id_{pair_key}",
+			)
+
+		if relation != "not linked" and suggested_link["left_id"] and suggested_link["right_id"]:
 			st.caption(
 				f"Suggested link: {suggested_link['left_id']} {RELATION_ARROW.get(suggested_link['relation'], '↔')} {suggested_link['right_id']}"
 				+ (f" based on {suggested_link['reason']}." if suggested_link["reason"] else ".")
 			)
 
-		#DEBUG
-		if suggested_link.get("timing"):
-			timing = suggested_link["timing"]
-			st.caption(
-				"Timing: "
-				f"profiles {timing['profile_seconds']}s, "
-				f"value sets {timing['value_set_seconds']}s, "
-				f"scoring {timing['scoring_seconds']}s, "
-				f"total {timing['total_seconds']}s"
-			)
+		# #debug speed
+		# if suggested_link.get("timing"):
+		# 	timing = suggested_link["timing"]
+		# 	st.caption(
+		# 		"Timing: "
+		# 		f"profiles {timing['profile_seconds']}s, "
+		# 		f"value sets {timing['value_set_seconds']}s, "
+		# 		f"scoring {timing['scoring_seconds']}s, "
+		# 		f"total {timing['total_seconds']}s"
+		# 	)
 		if relation != "not linked" and (not left_id or not right_id):
 			st.warning("This pair has a relation but no left/right id selected.")
 
@@ -431,6 +464,9 @@ for left_table, right_table in table_pairs:
 			"relation": relation,
 			"left_id": left_id,
 			"right_id": right_id,
+			# Preserve the last non-empty selection so it can be restored when switching back
+			"last_left_id": left_id if left_id else stored_relationship.get("last_left_id", default_left_id),
+			"last_right_id": right_id if right_id else stored_relationship.get("last_right_id", default_right_id),
 		}
 		relationship_records.append(relationship_record)
 		st.session_state["table_relationships"][pair_key] = relationship_record

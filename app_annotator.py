@@ -13,7 +13,10 @@ st.title("🌱 Tabular Soil Data Annotation")
 st.markdown("""🧪 Experimental tool developed within the Soilwise project. All feedback is welcome! --> 
             <a href='mailto:max.vercruyssen@vlaanderen.be' target='_blank'>Contact us trough mail</a>
             or
-            <a href="https://outlook.office.com/bookwithme/user/ab3771ccfeed4c5c83ca7a43d657865d@vlaanderen.be?" target="_blank">book a meeting with us</a>""",
+            <a href="https://outlook.office.com/bookwithme/user/ab3771ccfeed4c5c83ca7a43d657865d@vlaanderen.be?" target="_blank">book a meeting with us</a>
+            or
+            trough the issues of the project repository on GitHub
+            """,
             unsafe_allow_html=True)
 
 
@@ -56,7 +59,7 @@ With this tool, you can:
 - Improve clarity, consistency, and reusability of your data  
 - Prepare your dataset for FAIR publication with **less manual effort**
 
-This is an **experimental tool**: your feedback helps shape how we collectively improve data annotation workflows in Soilwise.
+We can't stress this enough: This is an **experimental tool**. Your feedback helps shape how we collectively improve data annotation workflows in Soilwise. So please, try it out and share your thoughts!
 """)
 
 st.markdown("""
