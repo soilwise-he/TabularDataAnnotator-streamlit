@@ -1,5 +1,6 @@
 # streamlit
-.streamlit/
+.streamlit/config.toml
+.streamlit/secrets.toml
 
 data/*_cache.json
 
