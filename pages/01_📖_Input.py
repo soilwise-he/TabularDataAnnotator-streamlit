@@ -54,9 +54,9 @@ SESSION_RESET_KEYS = [
     "tabular_data_dict",
     "filename_dict",
     "uploaded_filename",
-    "zenodo_context_files_url",
-    "zenodo_context_metadata",
-    "zenodo_context_files_from_zip",
+    "remote_context_files_url",
+    "remote_context_metadata",
+    "remote_context_files_from_zip",
     "zenodo_loaded",
     "primary_keys",
     "context_files",
@@ -1001,8 +1001,8 @@ with col1:
 
     if mode not in ('url - zenodo', 'url - github'):
         st.session_state["_active_zenodo_cache_key"] = None
-        st.session_state.pop("zenodo_context_files_url", None)
-        st.session_state.pop("zenodo_context_metadata", None)
+        st.session_state.pop("remote_context_files_url", None)
+        st.session_state.pop("remote_context_metadata", None)
 
     if mode != 'url - github':
         st.session_state["_active_github_cache_key"] = None
@@ -1020,7 +1020,7 @@ elif "tabular_data_dict" in st.session_state:
     # Signature unchanged or navigating back: skip all file I/O, restore from session state
     tabular_dict = {k: df.copy() for k, df in st.session_state["tabular_data_dict"].items()}
     filename_dict = dict(st.session_state.get("filename_dict", {}))
-    zipped_context_files = list(st.session_state.get("zenodo_context_files_from_zip", []))
+    zipped_context_files = list(st.session_state.get("remote_context_files_from_zip", []))
     if mode == 'linked':
         site_df = st.session_state.get("_linked_site_df")
         obs_df = st.session_state.get("_linked_obs_df")
@@ -1085,8 +1085,8 @@ if _need_processing:
         if cached_zenodo is not None:
             tabular_dict.update({k: v.copy() for k, v in cached_zenodo["tabular_dict"].items()})
             filename_dict.update(dict(cached_zenodo["filename_dict"]))
-            st.session_state['zenodo_context_files_url'] = list(cached_zenodo["files_url_context"])
-            st.session_state['zenodo_context_metadata'] = dict(cached_zenodo["metadata_context"])
+            st.session_state['remote_context_files_url'] = list(cached_zenodo["files_url_context"])
+            st.session_state['remote_context_metadata'] = dict(cached_zenodo["metadata_context"])
             zipped_context_files.extend(list(cached_zenodo["zipped_context_files"]))
         else:
             filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
@@ -1097,13 +1097,13 @@ if _need_processing:
 
             filtered_extensions_context = ['.doc', '.docx', '.pdf', '.md', '.txt']
             files_url_context = get_files_URL_from_Zenodo_id(_record_id, extensions=filtered_extensions_context)
-            st.session_state['zenodo_context_files_url'] = files_url_context
+            st.session_state['remote_context_files_url'] = files_url_context
 
             metadata_context_full = get_metadata_from_Zenodo_id(_record_id)
             metadata_context = {k: metadata_context_full[k] for k in {"title", "description"} if k in metadata_context_full}
             if "description" in metadata_context:
                 metadata_context["description"] = description_to_plain_text(metadata_context["description"])
-            st.session_state['zenodo_context_metadata'] = metadata_context
+            st.session_state['remote_context_metadata'] = metadata_context
 
             for file_url in files_url_tabular:
                 file_response, name_file, ext_file = request_file_from_zenodo(file_url)
@@ -1131,8 +1131,8 @@ if _need_processing:
                 "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
                 "filename_dict": dict(filename_dict),
                 "zipped_context_files": list(zipped_context_files),
-                "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
-                "metadata_context": dict(st.session_state.get('zenodo_context_metadata', {})),
+                "files_url_context": list(st.session_state.get('remote_context_files_url', [])),
+                "metadata_context": dict(st.session_state.get('remote_context_metadata', {})),
             }
 
     elif mode == 'url - github' and _github_urls:
@@ -1146,7 +1146,7 @@ if _need_processing:
         if cached_github is not None:
             tabular_dict.update({k: v.copy() for k, v in cached_github["tabular_dict"].items()})
             filename_dict.update(dict(cached_github["filename_dict"]))
-            st.session_state['zenodo_context_files_url'] = list(cached_github["files_url_context"])
+            st.session_state['remote_context_files_url'] = list(cached_github["files_url_context"])
             zipped_context_files.extend(list(cached_github["zipped_context_files"]))
         else:
             filtered_extensions_github = filtered_extensions_tabular + filtered_extensions_zip + filtered_extensions_context
@@ -1200,15 +1200,15 @@ if _need_processing:
                     else:
                         st.warning(f"Skipped unsupported file type '{ext_file}' from {file_url}")
 
-            st.session_state['zenodo_context_files_url'] = list(github_context_urls)
+            st.session_state['remote_context_files_url'] = list(github_context_urls)
             st.session_state[github_cache_key] = {
                 "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
                 "filename_dict": dict(filename_dict),
                 "zipped_context_files": list(zipped_context_files),
-                "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
+                "files_url_context": list(st.session_state.get('remote_context_files_url', [])),
             }
 
-    st.session_state["zenodo_context_files_from_zip"] = zipped_context_files
+    st.session_state["remote_context_files_from_zip"] = zipped_context_files
 
 
 

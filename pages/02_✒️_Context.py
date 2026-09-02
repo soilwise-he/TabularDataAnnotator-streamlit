@@ -748,8 +748,8 @@ else:
             st.session_state["zenodo_loaded"] = False
 
         if not st.session_state["zenodo_loaded"]:
-            if st.session_state.get("zenodo_context_files_url"):
-                for url in st.session_state["zenodo_context_files_url"]:
+            if st.session_state.get("remote_context_files_url"):
+                for url in st.session_state["remote_context_files_url"]:
                     filename = filename_from_url(url)
                     if not any(f.name == filename for f in st.session_state["context_files"]):
                         st.session_state["context_files"].append(load_file_from_url(url))
@@ -841,8 +841,8 @@ else:
 
         #if not st.session_state["zenodo_meta_loaded"]:
 
-        if st.session_state.get("zenodo_context_metadata"):
-            meta = st.session_state["zenodo_context_metadata"]
+        if st.session_state.get("remote_context_metadata"):
+            meta = st.session_state["remote_context_metadata"]
 
             fields = ("title", "description")
             suggested_text = "  \n".join(
@@ -859,7 +859,7 @@ else:
             # st.session_state["zenodo_meta_loaded"] = True
 
 
-        if st.session_state.get("zenodo_context_metadata"):
+        if st.session_state.get("remote_context_metadata"):
             text_area_header = "Write your custom context here, we pre-filled it with the title and abstract from zenodo:"
         else:
             text_area_header = "Write your custom context here:"

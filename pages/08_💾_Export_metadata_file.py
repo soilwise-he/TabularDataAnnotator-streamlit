@@ -873,9 +873,9 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
     today = date.today().isoformat()
 
     # --- discovery / context info ---
-    zenodo_meta = st.session_state.get("zenodo_context_metadata", {})
-    title = str(zenodo_meta.get("title") or table_key)
-    abstract = str(zenodo_meta.get("description") or "")
+    remote_meta = st.session_state.get("remote_context_metadata", {})
+    title = str(remote_meta.get("title") or table_key)
+    abstract = str(remote_meta.get("description") or "")
 
     # --- spatial extent ---
     spatial_fit_for_all = st.session_state.get("spatial_fit_for_all", {}).get(table_key, {})
