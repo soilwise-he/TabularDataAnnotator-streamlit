@@ -628,6 +628,21 @@ def load_file_from_url(url: str) -> ContextFile:
         ext=extention
     )
 
+
+def load_file_from_zip_entry(entry: dict) -> ContextFile:
+    source_zip = entry.get("source_zip", "archive")
+    member_path = entry.get("member_path", "")
+    raw = entry.get("bytes", b"")
+    name = f"{member_path} (from {source_zip})" if member_path else f"{source_zip} archive member"
+    extention = os.path.splitext(member_path)[1].lstrip(".").lower()
+    return ContextFile(
+        name=name,
+        content=raw,
+        mime_type="application/octet-stream",
+        source="zip",
+        ext=extention,
+    )
+
 def filename_from_url(url: str) -> str:
     filename = urlparse(url).path.split('/')[-1]
     if filename=="content":
@@ -753,6 +768,11 @@ else:
                     filename = filename_from_url(url)
                     if not any(f.name == filename for f in st.session_state["context_files"]):
                         st.session_state["context_files"].append(load_file_from_url(url))
+            if st.session_state.get("remote_context_files_from_zip"):
+                for entry in st.session_state["remote_context_files_from_zip"]:
+                    zip_context = load_file_from_zip_entry(entry)
+                    if not any(f.name == zip_context.name for f in st.session_state["context_files"]):
+                        st.session_state["context_files"].append(zip_context)
             st.session_state["zenodo_loaded"] = True
 
     
@@ -825,6 +845,8 @@ else:
             with col2:
                 if f.source == "url":
                     st.caption("🔗 Zenodo")
+                elif f.source == "zip":
+                    st.caption("🗜️ Archive")
                 elif f.source == "webpage":
                     st.caption("🌐 Webpage")
                 else:
