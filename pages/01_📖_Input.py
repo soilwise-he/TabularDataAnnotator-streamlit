@@ -23,7 +23,7 @@ from util.metadata import apply_new_metadata_info
 import html
 from bs4 import BeautifulSoup
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import zipfile
 
 
@@ -80,6 +80,7 @@ SESSION_RESET_PREFIXES = [
 
 def _clear_dependent_session_state_for_new_input():
     preserve_zenodo_cache_key = st.session_state.get("_active_zenodo_cache_key")
+    preserve_github_cache_key = st.session_state.get("_active_github_cache_key")
 
     for key in SESSION_RESET_KEYS:
         st.session_state.pop(key, None)
@@ -90,6 +91,10 @@ def _clear_dependent_session_state_for_new_input():
 
     for key in list(st.session_state.keys()):
         if key.startswith("_zenodo_ingest_cache_") and key != preserve_zenodo_cache_key:
+            st.session_state.pop(key, None)
+
+    for key in list(st.session_state.keys()):
+        if key.startswith("_github_ingest_cache_") and key != preserve_github_cache_key:
             st.session_state.pop(key, None)
 
     # # Keep non-table context files (e.g. user-provided docs) but remove stale table-derived context.
@@ -110,6 +115,143 @@ def filename_from_url(url: str) -> str:
         url_strip = url[:-len("/content")]
         filename=filename_from_url(url_strip)
     return filename
+
+
+def normalize_github_file_url(url: str) -> str:
+    """Normalize GitHub file URLs to directly downloadable raw URLs."""
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower()
+
+    if host == "raw.githubusercontent.com":
+        return url.strip()
+
+    if host in {"github.com", "www.github.com"}:
+        parts = parsed.path.strip("/").split("/")
+        # Expected: /owner/repo/blob/branch/path/to/file.csv
+        if len(parts) >= 5 and parts[2] == "blob":
+            owner, repo, _, branch = parts[:4]
+            file_path = "/".join(parts[4:])
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
+
+    raise ValueError(
+        "Invalid GitHub file URL. Use a raw.githubusercontent.com URL or a github.com/.../blob/... file URL."
+    )
+
+
+def normalize_github_input_url(url: str) -> str:
+    """Validate GitHub input URL for file or folder/repository usage."""
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower()
+    parts = parsed.path.strip("/").split("/") if parsed.path.strip("/") else []
+
+    if host == "raw.githubusercontent.com":
+        if len(parts) >= 5:
+            return url.strip()
+        raise ValueError("Invalid raw GitHub URL.")
+
+    if host in {"github.com", "www.github.com"}:
+        if len(parts) >= 2:
+            # Supports repo root, tree folder URLs, and blob file URLs.
+            return f"https://github.com/{'/'.join(parts)}"
+
+    raise ValueError(
+        "Invalid GitHub URL. Use a repository/folder URL, raw.githubusercontent.com URL, or github.com/.../blob/... file URL."
+    )
+
+
+@st.cache_data()
+def get_default_branch_from_github(owner: str, repo: str) -> str:
+    request_url = f"https://api.github.com/repos/{owner}/{repo}"
+    response = requests.get(request_url, headers={"Accept": "application/vnd.github+json"})
+    response.raise_for_status()
+    response_json = response.json()
+    default_branch = response_json.get("default_branch")
+    if not default_branch:
+        raise ValueError(f"Could not determine default branch for {owner}/{repo}.")
+    return default_branch
+
+
+@st.cache_data()
+def resolve_github_input_to_file_urls(
+    url: str,
+    extensions: Optional[Sequence[str]] = None,
+    recursive: bool = True,
+) -> list[str]:
+    """Resolve GitHub file/folder/repo URL(s) to raw downloadable file URLs."""
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower()
+    exts = None
+    if extensions:
+        exts = tuple((e if e.startswith(".") else f".{e}").lower() for e in extensions)
+
+    if host == "raw.githubusercontent.com":
+        raw_url = url.strip()
+        if exts and not raw_url.lower().endswith(exts):
+            return []
+        return [raw_url]
+
+    if host not in {"github.com", "www.github.com"}:
+        raise ValueError("Only github.com and raw.githubusercontent.com URLs are supported.")
+
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) < 2:
+        raise ValueError("GitHub URL must include owner and repository.")
+
+    owner = parts[0]
+    repo = parts[1]
+
+    # File URL: /owner/repo/blob/branch/path/to/file
+    if len(parts) >= 5 and parts[2] == "blob":
+        raw_url = normalize_github_file_url(url)
+        if exts and not raw_url.lower().endswith(exts):
+            return []
+        return [raw_url]
+
+    # Folder URL: /owner/repo/tree/branch/path/to/folder
+    if len(parts) >= 4 and parts[2] == "tree":
+        branch = parts[3]
+        folder_path = "/".join(parts[4:])
+    # Repository root URL: /owner/repo
+    elif len(parts) >= 2:
+        branch = get_default_branch_from_github(owner, repo)
+        folder_path = ""
+    else:
+        raise ValueError("Unsupported GitHub URL format.")
+
+    resolved_files: list[str] = []
+    stack = [folder_path]
+
+    while stack:
+        current_path = stack.pop()
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
+        if current_path:
+            api_url = f"{api_url}/{quote(current_path, safe='/')}"
+
+        response = requests.get(
+            api_url,
+            headers={"Accept": "application/vnd.github+json"},
+            params={"ref": branch},
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        entries = data if isinstance(data, list) else [data]
+        for entry in entries:
+            entry_type = entry.get("type")
+            if entry_type == "file":
+                download_url = entry.get("download_url")
+                entry_path = entry.get("path", "")
+                if not download_url:
+                    continue
+                if exts and not entry_path.lower().endswith(exts):
+                    continue
+                resolved_files.append(download_url)
+            elif entry_type == "dir" and recursive:
+                entry_path = entry.get("path")
+                if entry_path:
+                    stack.append(entry_path)
+
+    return resolved_files
 
 def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> str:
     """Detect the most specific CSVW datatype for a pandas Series using csvwlib.
@@ -581,6 +723,21 @@ def request_file_from_zenodo(url:str) -> tuple[requests.Response, str, str]:
 
     return file_response, name_file, ext_file
 
+
+@st.cache_data()
+def request_file_from_github(url: str) -> tuple[Optional[requests.Response], Optional[str], Optional[str], Optional[str]]:
+    try:
+        raw_url = normalize_github_file_url(url)
+        file_response = requests.get(raw_url)
+        file_response.raise_for_status()
+    except Exception as e:
+        st.error(f"Failed to read file from GitHub URL '{url}': {e}")
+        return None, None, None, None
+
+    name_file = filename_from_url(raw_url)
+    ext_file = os.path.splitext(name_file)[1].lower()
+    return file_response, name_file, ext_file, raw_url
+
 def get_excel(excel_file):
     xls = pd.ExcelFile(excel_file)
     sheets = xls.sheet_names
@@ -744,7 +901,7 @@ st.markdown("""
 
 st.markdown(""" --- """)
 
-mode = st.radio("Input mode", options=["single CSV", "linked", "excel", "url - zenodo"], index=0, horizontal=True, key='input_mode')
+mode = st.radio("Input mode", options=["single CSV", "linked", "excel", "url - zenodo", "url - github"], index=0, horizontal=True, key='input_mode')
 
 
 ## Different methods to convey the information
@@ -775,6 +932,8 @@ _uploaded = None
 _site_file = None
 _obs_file = None
 _excel_file = None
+_github_urls: list[str] = []
+_github_urls_input = ""
 
 # ---------- Phase 1: render widgets, collect tokens — no file I/O ----------
 with col1:
@@ -814,10 +973,39 @@ with col1:
             except ValueError as e:
                 st.error(str(e))
 
-    if mode != 'url - zenodo':
+    elif mode == 'url - github':
+        _github_urls_input = st.text_input(
+            "Enter a GitHub URL (file, folder, or repository)",
+            key='github_urls_input',
+        )
+
+        if _github_urls_input.strip():
+            candidate_urls = [u.strip() for u in re.split(r"[\n;,]", _github_urls_input) if u.strip()]
+            normalized_urls = []
+            for candidate in candidate_urls:
+                try:
+                    normalized_urls.append(normalize_github_input_url(candidate))
+                except ValueError as e:
+                    st.error(f"{candidate}: {e}")
+
+            if normalized_urls:
+                _github_urls = normalized_urls
+                for gh_url in _github_urls:
+                    upload_tokens.append(f"github:{gh_url}")
+                github_cache_seed = "|".join(sorted(_github_urls))
+                github_cache_digest = hashlib.sha256(github_cache_seed.encode("utf-8")).hexdigest()
+                st.session_state["_active_github_cache_key"] = f"_github_ingest_cache_{github_cache_digest}"
+            else:
+                st.session_state["_active_github_cache_key"] = None
+
+
+    if mode not in ('url - zenodo', 'url - github'):
         st.session_state["_active_zenodo_cache_key"] = None
         st.session_state.pop("zenodo_context_files_url", None)
         st.session_state.pop("zenodo_context_metadata", None)
+
+    if mode != 'url - github':
+        st.session_state["_active_github_cache_key"] = None
 
 # ---------- Phase 2: signature check ----------
 has_active_input = bool(upload_tokens) or bool(url_input)
@@ -945,6 +1133,79 @@ if _need_processing:
                 "zipped_context_files": list(zipped_context_files),
                 "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
                 "metadata_context": dict(st.session_state.get('zenodo_context_metadata', {})),
+            }
+
+    elif mode == 'url - github' and _github_urls:
+        filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
+        filtered_extensions_zip = ['.zip']
+        filtered_extensions_context = ['.doc', '.docx', '.pdf', '.md', '.txt']
+        github_cache_seed = "|".join(sorted(_github_urls))
+        github_cache_key = st.session_state.get("_active_github_cache_key") or f"_github_ingest_cache_{hashlib.sha256(github_cache_seed.encode('utf-8')).hexdigest()}"
+        cached_github = st.session_state.get(github_cache_key)
+
+        if cached_github is not None:
+            tabular_dict.update({k: v.copy() for k, v in cached_github["tabular_dict"].items()})
+            filename_dict.update(dict(cached_github["filename_dict"]))
+            st.session_state['zenodo_context_files_url'] = list(cached_github["files_url_context"])
+            zipped_context_files.extend(list(cached_github["zipped_context_files"]))
+        else:
+            filtered_extensions_github = filtered_extensions_tabular + filtered_extensions_zip + filtered_extensions_context
+            processed_raw_urls = set()
+            github_context_urls = set()
+
+            for github_input_url in _github_urls:
+                try:
+                    resolved_file_urls = resolve_github_input_to_file_urls(
+                        github_input_url,
+                        extensions=filtered_extensions_github,
+                        recursive=True,
+                    )
+                except Exception as e:
+                    st.error(f"Failed to resolve GitHub URL '{github_input_url}': {e}")
+                    continue
+
+                if not resolved_file_urls:
+                    st.warning(f"No supported data files found at {github_input_url}")
+                    continue
+
+                for file_url in resolved_file_urls:
+                    if file_url in processed_raw_urls:
+                        continue
+                    processed_raw_urls.add(file_url)
+
+                    file_response, name_file, ext_file, raw_url = request_file_from_github(file_url)
+                    if file_response is None or name_file is None or ext_file is None or raw_url is None:
+                        continue
+
+                    if ext_file in ['.xlsx', '.xls']:
+                        bitesIO = io.BytesIO(file_response.content)
+                        bitesIO.name = name_file
+                        df_dict = get_excel(bitesIO)
+                        for sheet_name, df in df_dict.items():
+                            tabular_dict[f"{name_file} | {sheet_name}"] = df
+                            filename_dict[f"{name_file} | {sheet_name}"] = raw_url
+                    elif ext_file == '.csv':
+                        uploaded_df = read_csvBytes_with_sniffer(file_response.content)
+                        tabular_dict[name_file] = uploaded_df
+                        filename_dict[name_file] = raw_url
+                    elif ext_file in filtered_extensions_zip:
+                        process_zip_from_url(raw_url,
+                                                tabular_dict,
+                                                zipped_context_files,
+                                                filename_dict,
+                                                tabular_exts=filtered_extensions_tabular,
+                                                context_exts=filtered_extensions_context)
+                    elif ext_file in filtered_extensions_context:
+                        github_context_urls.add(raw_url)
+                    else:
+                        st.warning(f"Skipped unsupported file type '{ext_file}' from {file_url}")
+
+            st.session_state['zenodo_context_files_url'] = list(github_context_urls)
+            st.session_state[github_cache_key] = {
+                "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
+                "filename_dict": dict(filename_dict),
+                "zipped_context_files": list(zipped_context_files),
+                "files_url_context": list(st.session_state.get('zenodo_context_files_url', [])),
             }
 
     st.session_state["zenodo_context_files_from_zip"] = zipped_context_files
