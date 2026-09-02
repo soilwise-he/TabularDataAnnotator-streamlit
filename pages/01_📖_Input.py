@@ -888,6 +888,9 @@ if _need_processing:
         # https://zenodo.org/records/10028494 -> complex zip
         # https://zenodo.org/records/17305831 -> AI4SoilHealth SOC
         # https://zenodo.org/records/19177539 -> connected CSV's
+        # https://zenodo.org/records/19723699 -> Echo repo
+        # https://zenodo.org/records/14610222 -> Hungarian Soil Degradation with readme in description
+
         #######################################################
         zenodo_cache_key = f"_zenodo_ingest_cache_{_record_id}"
         cached_zenodo = st.session_state.get(zenodo_cache_key)
