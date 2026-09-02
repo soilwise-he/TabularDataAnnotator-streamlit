@@ -232,6 +232,7 @@ for old_tbl in list(st.session_state["column_buckets"]):
 
 # --------------- loop-invariant UI constants ---------------
 _TEMPORAL_OPTIONS = ["sosa:phenomenonTime", "sosa:resultTime"]
+_TEMPORAL_FIT_FOR_ALL_OPTIONS = ["No temporal information available"] + _TEMPORAL_OPTIONS
 _SPATIAL_OPTIONS = ["X", "Y", "Z", "XY reference system", "Z reference system", "WKT geometry", "BBOX"]
 _TEMPORAL_PRECISION = {
     "Year": "%Y",
@@ -367,27 +368,33 @@ for tab, tbl in zip(_tabs, tab_labels):
             else:
                 st.info("No temporal columns selected. Drag and drop temporal columns in the 'Temporal' bucket or indicate a 'fit-for-all' timestamp manually below.", icon="ℹ️")
 
-                # COMMENT: Do we need to also implement dateranges? Of Periodes; e.g. Q1 -> iso notation 2026-01/P3M (periode of 3 months starting Jan 1st, 2026) https://en.wikipedia.org/wiki/ISO_8601#Durations
+                # TODO: Do we need to also implement dateranges? Of Periodes; e.g. Q1 -> iso notation 2026-01/P3M (periode of 3 months starting Jan 1st, 2026) https://en.wikipedia.org/wiki/ISO_8601#Durations
                 
                 fit_for_all_type = st.radio(
-                    "Temporal type",
-                    _TEMPORAL_OPTIONS,
+                    "Temporal type - fit-for-all",
+                    _TEMPORAL_FIT_FOR_ALL_OPTIONS,
                     horizontal=True,
                     key=f"temporal_fit_for_all_type_{tbl}",
                 )
+                no_information_selected = fit_for_all_type == "No temporal information available"
                 fit_precision = st.selectbox(
                     "Datetime format input",
                     help = "indicate the format of the temporal column(s) in this table, if you want to apply a fit-for-all format for parsing timestamps. This will be applied to all columns in the 'Temporal' bucket that don't have an individual format specified above.",
                     options=list(_TEMPORAL_PRECISION.keys()),
                     index=list(_TEMPORAL_PRECISION.keys()).index("DateTime (minute)"),
                     key=f"temporal_fit_for_all_precision_{tbl}",
+                    disabled=no_information_selected,
                 )
 
                 today = date.today()
                 default_year = max(1, min(9999, today.year))
                 fit_value = ""
 
-                if fit_precision == "Year":
+                if no_information_selected:
+                    st.caption("No information selected. All fit-for-all temporal inputs are disabled.")
+                    st.session_state["temporal_deepdive"][tbl].pop("__fit_for_all__", None)
+                    st.session_state["temporal_precision"][tbl].pop("__fit_for_all__", None)
+                elif fit_precision == "Year":
                     year_val = st.number_input(
                         "Year",
                         min_value=1,
@@ -395,6 +402,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                         value=default_year,
                         step=1,
                         key=f"temporal_fit_for_all_year_{tbl}",
+                        disabled=no_information_selected,
                     )
                     fit_value = f"{int(year_val):04d}"
                 elif fit_precision == "Year-Month":
@@ -407,6 +415,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                             value=default_year,
                             step=1,
                             key=f"temporal_fit_for_all_yearmonth_year_{tbl}",
+                            disabled=no_information_selected,
                         )
                     with ym_month_col:
                         month_val = st.selectbox(
@@ -414,6 +423,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                             options=list(range(1, 13)),
                             index=today.month - 1,
                             key=f"temporal_fit_for_all_yearmonth_month_{tbl}",
+                            disabled=no_information_selected,
                         )
                     fit_value = f"{int(year_val):04d}-{int(month_val):02d}"
                 elif fit_precision == "Date":
@@ -421,6 +431,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                         "Date",
                         value=today,
                         key=f"temporal_fit_for_all_date_{tbl}",
+                        disabled=no_information_selected,
                     )
                     fit_value = date_val.isoformat()
                 elif fit_precision == "DateTime (minute)":
@@ -430,6 +441,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                             "Date",
                             value=today,
                             key=f"temporal_fit_for_all_dt_min_date_{tbl}",
+                            disabled=no_information_selected,
                         )
                     with dt_time_col:
                         time_val = st.time_input(
@@ -437,6 +449,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                             value=datetime.now().replace(second=0, microsecond=0).time(),
                             step=timedelta(minutes=1),
                             key=f"temporal_fit_for_all_dt_min_time_{tbl}",
+                            disabled=no_information_selected,
                         )
                     fit_value = f"{date_val.isoformat()}T{time_val.strftime('%H:%M')}"
                 # 
@@ -458,13 +471,14 @@ for tab, tbl in zip(_tabs, tab_labels):
                 #         )
                 #     fit_value = f"{date_val.isoformat()}T{time_val.strftime('%H:%M:%S')}"
 
-                fit_format = _TEMPORAL_PRECISION[fit_precision]
-                st.caption(f"Check: `{fit_value}` | Format: `{fit_format}`")
+                if not no_information_selected:
+                    fit_format = _TEMPORAL_PRECISION[fit_precision]
+                    st.caption(f"Check: `{fit_value}` | Format: `{fit_format}`")
 
-                st.session_state["temporal_deepdive"][tbl]["__fit_for_all__"] = {
-                    fit_value: fit_for_all_type
-                }
-                st.session_state["temporal_precision"][tbl]["__fit_for_all__"] = fit_precision
+                    st.session_state["temporal_deepdive"][tbl]["__fit_for_all__"] = {
+                        fit_value: fit_for_all_type
+                    }
+                    st.session_state["temporal_precision"][tbl]["__fit_for_all__"] = fit_precision
 
         
         # --- Spatial sub-type selection ---
@@ -515,63 +529,119 @@ for tab, tbl in zip(_tabs, tab_labels):
                     st.session_state["spatial_deepdive"][tbl][scol] = sel
 
             # Roles that are not yet assigned to any column
-            assigned_roles = {
+            assigned_spatial_features = {
                 v for v in st.session_state["spatial_deepdive"][tbl].values()
                 if v is not None
             }
-            unassigned_roles = [r for r in _SPATIAL_OPTIONS if r not in assigned_roles]
 
             # Remove fit-for-all entries whose role is now covered by a column
             if "spatial_fit_for_all" not in st.session_state:
                 st.session_state["spatial_fit_for_all"] = {}
             if tbl not in st.session_state["spatial_fit_for_all"]:
                 st.session_state["spatial_fit_for_all"][tbl] = {}
+            spatial_fit_for_all_tbl = st.session_state["spatial_fit_for_all"][tbl]
+
+            def _has_meaningful_value(value) -> bool:
+                if value is None:
+                    return False
+                if pd.isna(value):
+                    return False
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    return bool(stripped) and stripped != "0"
+                try:
+                    return float(value) != 0.0
+                except (TypeError, ValueError):
+                    return True
+
+            def _default_or_existing(existing_fit, suggested_fit):
+                if _has_meaningful_value(existing_fit):
+                    return existing_fit
+                return suggested_fit if suggested_fit is not None else existing_fit
+
+            existing_x_value = spatial_fit_for_all_tbl.get("X")
+            existing_y_value = spatial_fit_for_all_tbl.get("Y")
+            existing_z_value = spatial_fit_for_all_tbl.get("Z")
+            existing_xy_reference_system = spatial_fit_for_all_tbl.get("XY reference system")
+            existing_z_reference_system = spatial_fit_for_all_tbl.get("Z reference system")
+
+            has_xy_context = (
+                bool({"X", "Y"} & assigned_spatial_features)
+                or _has_meaningful_value(existing_x_value)
+                or _has_meaningful_value(existing_y_value)
+            )
+            has_z_context = (
+                "Z" in assigned_spatial_features
+                or _has_meaningful_value(existing_z_value)
+            )
+
+            show_xy_reference_system = has_xy_context
+            show_z_reference_system = has_z_context
+
+            if not show_xy_reference_system:
+                spatial_fit_for_all_tbl.pop("XY reference system", None)
+                st.session_state.pop(f"spatial_fit_for_all_{tbl}_XY reference system", None)
+            if not show_z_reference_system:
+                spatial_fit_for_all_tbl.pop("Z reference system", None)
+                st.session_state.pop(f"spatial_fit_for_all_{tbl}_Z reference system", None)
+
+            available_spatial_features = []
+            for spatial_feature in _SPATIAL_OPTIONS:
+                if spatial_feature in assigned_spatial_features:
+                    continue
+                if spatial_feature == "XY reference system" and not show_xy_reference_system:
+                    continue
+                if spatial_feature == "Z reference system" and not show_z_reference_system:
+                    continue
+                available_spatial_features.append(spatial_feature)
+
             st.session_state["spatial_fit_for_all"][tbl] = {
-                role: v
-                for role, v in st.session_state["spatial_fit_for_all"][tbl].items()
-                if role not in assigned_roles
+                spatial_feature: v
+                for spatial_feature, v in st.session_state["spatial_fit_for_all"][tbl].items()
+                if spatial_feature not in assigned_spatial_features
             }
 
-            if unassigned_roles:
+            if available_spatial_features:
                 st.markdown("**Alternative: Fit-for-all values for unassigned context**")
                 st.caption(
                     "The following spatial context items have no column assigned. "
                     "You can provide a default value for all observations."
                 )
 
-                set_unassigned_columns = st.columns(max(4, len(unassigned_roles)))
+                set_unassigned_columns = st.columns(max(4, len(available_spatial_features)))
 
-                for i, role in enumerate(unassigned_roles):
+                for i, spatial_feature in enumerate(available_spatial_features):
                     # Use the stored value if the key exists; only fall back to
-                    # the suggested default when the role has never been visited.
-                    if role in st.session_state["spatial_fit_for_all"][tbl]:
-                        existing_fit = st.session_state["spatial_fit_for_all"][tbl][role]
-                    elif role == "XY reference system":
-                        existing_fit = 4326
-                    elif role == "Z reference system":
-                        existing_fit = 9389
-                    else:
-                        existing_fit = None
+                    # the suggested default when the spatial_feature has never been visited.
+                    existing_fit = st.session_state["spatial_fit_for_all"][tbl].get(spatial_feature)
 
-                    help_text = "Please provide an [EPSG code](https://epsg.io/) (e.g. 4326 for WGS 84, 9389 for EVRF2019 height)  \n Enter '0' to delete" if "reference system" in role else None
+                    suggested_fit = None
+                    if spatial_feature == "XY reference system" and has_xy_context:
+                        suggested_fit = 4326
+                    elif spatial_feature == "Z reference system" and has_z_context:
+                        suggested_fit = 9389
 
-                    if role not in {"WKT geometry", "BBOX"}:
+                    existing_fit = _default_or_existing(existing_fit, suggested_fit)
+
+                    help_text = "Please provide an [EPSG code](https://epsg.io/) (e.g. 4326 for WGS 84, 9389 for EVRF2019 height)  \n Enter '0' to delete" if "reference system" in spatial_feature else None
+
+                    if spatial_feature not in {"WKT geometry", "BBOX"}:
                         fit = set_unassigned_columns[i].number_input(
-                            role,
+                            spatial_feature,
                             value=existing_fit,
                             help=help_text,
-                            key=f"spatial_fit_for_all_{tbl}_{role}"
+                            key=f"spatial_fit_for_all_{tbl}_{spatial_feature}"
                             )
                     else:
                         fit = set_unassigned_columns[i].text_input(
-                            role,
+                            spatial_feature,
                             value=existing_fit if existing_fit is not None else "",
                             help=help_text,
-                            key=f"spatial_fit_for_all_{tbl}_{role}"
+                            key=f"spatial_fit_for_all_{tbl}_{spatial_feature}"
                         )
-                    st.session_state["spatial_fit_for_all"][tbl][role] = fit
+                    st.session_state["spatial_fit_for_all"][tbl][spatial_feature] = fit
 
-                    if "reference system" in role and fit:
+                    if "reference system" in spatial_feature and fit:
                         _maptiler_key = st.secrets.get("MAPTILER", {}).get("api_key", "")
                         _epsg_valid, _epsg_name = _check_epsg(int(fit), _maptiler_key)
                         if _epsg_valid is True:
@@ -581,8 +651,8 @@ for tab, tbl in zip(_tabs, tab_labels):
 
                 # Rebuild fit-for-all dict from all accumulated role→value pairs.
                 st.session_state["spatial_deepdive"][tbl]["__fit_for_all__"] = {
-                    role: fit
-                    for role, fit in st.session_state["spatial_fit_for_all"][tbl].items()
+                    spatial_feature: fit
+                    for spatial_feature, fit in st.session_state["spatial_fit_for_all"][tbl].items()
                 }
 
             
@@ -624,8 +694,8 @@ for tab, tbl in zip(_tabs, tab_labels):
         _t_begin = None
         _t_end = None
         if _fit_all:
-            # fit_for_all is {fit_value: role}; fixed-point extent
-            _fit_value = next(iter(_fit_all))
+            # fit_for_all is {fit_value: temporal feature}; fixed-point extent
+            _fit_value, _fit_feature = next(iter(_fit_all.items()))
             _t_begin = _fit_value
             _t_end = _fit_value
         else:
@@ -643,3 +713,61 @@ for tab, tbl in zip(_tabs, tab_labels):
         st.session_state["temporal_extent"][tbl] = {"begin": _t_begin, "end": _t_end}
 
         st.session_state[meta_key][tbl]
+
+
+fit_for_all_rows = []
+
+
+def _is_meaningful_fit_value(value) -> bool:
+    if value is None:
+        return False
+    if pd.isna(value):
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return False
+        if stripped == "0":
+            return False
+        return True
+    try:
+        return float(value) != 0.0
+    except (TypeError, ValueError):
+        return True
+
+
+for tbl in st.session_state.get("column_buckets", {}):
+    temporal_fit_all = st.session_state.get("temporal_deepdive", {}).get(tbl, {}).get("__fit_for_all__")
+    temporal_precision = st.session_state.get("temporal_precision", {}).get(tbl, {}).get("__fit_for_all__")
+    if temporal_fit_all:
+        temporal_value, temporal_type = next(iter(temporal_fit_all.items()))
+        if _is_meaningful_fit_value(temporal_value):
+            fit_for_all_rows.append({
+                "table": tbl,
+                "kind": "temporal",
+                "value": temporal_value,
+                "type": temporal_type,
+                "precision": temporal_precision or "",
+            })
+
+    spatial_fit_all = st.session_state.get("spatial_deepdive", {}).get(tbl, {}).get("__fit_for_all__")
+    if spatial_fit_all:
+        spatial_fit_all = {
+            spatial_key: spatial_value
+            for spatial_key, spatial_value in spatial_fit_all.items()
+            if _is_meaningful_fit_value(spatial_value)
+        }
+        if not spatial_fit_all:
+            continue
+        fit_for_all_rows.append({
+            "table": tbl,
+            "kind": "spatial",
+            "value": json.dumps(spatial_fit_all, ensure_ascii=False),
+            "type": "",
+            "precision": "",
+        })
+
+if fit_for_all_rows:
+    st.markdown("---")
+    st.markdown("### Fit-for-all summary")
+    st.dataframe(pd.DataFrame(fit_for_all_rows), width="stretch", hide_index=True)
