@@ -1,4 +1,4 @@
-import ast
+﻿import ast
 import streamlit as st
 import pandas as pd
 import io
@@ -18,7 +18,7 @@ import requests
 
 import csv
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo, add_clear_cache_button
-from util.metadata import apply_new_metadata_info
+from util.metadata import apply_new_metadata_info, normalize_metadata_columns
 
 import html
 from bs4 import BeautifulSoup
@@ -546,23 +546,80 @@ def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
         Date_Time_format = detect_date_format_from_series(df[c]) if dtype in ("date", "dateTime", "time") else ""
         cols.append({
             "name": c,
-            "datatype": dtype,
-            "dateTime format": Date_Time_format,
-            "element": "",
+            "resulttype": dtype,
+            "resultformat": Date_Time_format,
             "concept": "",
-            "concept_uri": "",
+            "element": "",
+            "element uri": "",
             "unit_symbol": "",
             "unit_uri": "",
+            "quantity kind_uri": "",
             "method": "",
             "description": "",
-            "quantity kind_uri": "",
         })
 
     return pd.DataFrame(cols)
 
 @st.cache_data()
 def read_csvBytes_with_sniffer(raw:bytes) -> pd.DataFrame:
-    
+
+    def _best_delimiter(lines: list[str]) -> tuple[str, int]:
+        """Return (delimiter, expected_field_count) using the most consistent split."""
+        candidates = [",", ";", "\t", "|"]
+        best_sep = ","
+        best_fields = 1
+        best_support = -1
+
+        for sep in candidates:
+            split_counts = [line.count(sep) for line in lines if line.count(sep) > 0]
+            if not split_counts:
+                continue
+
+            mode_count = max(set(split_counts), key=split_counts.count)
+            support = split_counts.count(mode_count)
+            if support > best_support or (support == best_support and mode_count > (best_fields - 1)):
+                best_support = support
+                best_sep = sep
+                best_fields = mode_count + 1
+
+        return best_sep, best_fields
+
+    def _looks_like_datetime(text_token: str) -> bool:
+        token = str(text_token or "").strip()
+        if len(token) < 6:
+            return False
+        try:
+            dateutil_parser.parse(token)
+            return True
+        except Exception:
+            return False
+
+    def _looks_like_number(text_token: str) -> bool:
+        token = str(text_token or "").strip()
+        if token == "":
+            return False
+        try:
+            float(token)
+            return True
+        except Exception:
+            return False
+
+    def _looks_like_data_row(parts: list[str]) -> bool:
+        non_empty = [p.strip() for p in parts if str(p).strip() != ""]
+        if not non_empty:
+            return False
+
+        matches = 0
+        for token in non_empty:
+            normalized = token.lower()
+            if normalized in {"true", "false", "0", "1"}:
+                matches += 1
+                continue
+            if _looks_like_number(token) or _looks_like_datetime(token):
+                matches += 1
+
+        return (matches / len(non_empty)) >= 0.6
+
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -571,10 +628,66 @@ def read_csvBytes_with_sniffer(raw:bytes) -> pd.DataFrame:
         text = raw.decode(enc, errors="replace")
 
     sample = text[:65536]  # first 64KB is usually enough
-    dialect_uploaded = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
-    separator_uploaded = dialect_uploaded.delimiter
-    df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
-    return df
+    try:
+        dialect_uploaded = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
+        separator_uploaded = dialect_uploaded.delimiter
+    except Exception:
+        separator_uploaded, _ = _best_delimiter([line for line in text.splitlines() if line.strip()])
+
+    try:
+        return pd.read_csv(io.StringIO(text), sep=separator_uploaded)
+    except pd.errors.ParserError:
+        # Fallback for files that have a metadata preamble before tabular rows.
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return pd.DataFrame()
+
+        sep, expected_fields = _best_delimiter(lines)
+        expected_delims = max(0, expected_fields - 1)
+
+        start_idx = 0
+        min_streak = 2
+        for i in range(len(lines)):
+            if lines[i].count(sep) != expected_delims:
+                continue
+            streak = 0
+            for j in range(i, min(i + 5, len(lines))):
+                if lines[j].count(sep) == expected_delims:
+                    streak += 1
+            if streak >= min_streak:
+                start_idx = i
+                break
+
+        tabular_text = "\n".join(lines[start_idx:])
+        if not tabular_text.strip():
+            return pd.DataFrame()
+
+        first_parts = [p.strip() for p in lines[start_idx].split(sep)]
+        second_parts = []
+        if start_idx + 1 < len(lines):
+            second_parts = [p.strip() for p in lines[start_idx + 1].split(sep)]
+
+        first_is_data = _looks_like_data_row(first_parts)
+        second_is_data = _looks_like_data_row(second_parts) if second_parts else False
+        has_header = not (first_is_data and second_is_data)
+
+        if has_header:
+            return pd.read_csv(
+                io.StringIO(tabular_text),
+                sep=sep,
+                engine="python",
+                on_bad_lines="skip",
+            )
+
+        df = pd.read_csv(
+            io.StringIO(tabular_text),
+            sep=sep,
+            header=None,
+            engine="python",
+            on_bad_lines="skip",
+        )
+        df.columns = [f"column_{idx + 1}" for idx in range(df.shape[1])]
+        return df
 
 #TODO: outdated. Needs update to new metadata structure and merging logic.
 @st.cache_data()
@@ -606,12 +719,12 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                 for f in j['fields']:
                     rows.append({
                         'name': f.get('name'),
-                        'datatype': f.get('type') or '',
+                        'resulttype': f.get('type') or '',
                         'description': f.get('description') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'concept': f.get('title') or '',
-                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
+                        'element': f.get('title') or '',
+                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             # CSVW style
@@ -620,12 +733,12 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                 for f in j['tableSchema']['columns']:
                     rows.append({
                         'name': f.get('name'),
-                        'datatype': f.get('datatype') or '',
+                        'resulttype': f.get('datatype') or f.get('resulttype') or '',
                         'description': f.get('null') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'concept': (f.get('titles') or [''])[0],
-                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
+                        'element': (f.get('titles') or [''])[0],
+                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
@@ -1136,6 +1249,15 @@ if _need_processing:
             }
 
     elif mode == 'url - github' and _github_urls:
+        # PIN : Github Test URLS
+
+        # https://github.com/soilwise-he/soil-observation-data-encodings/tree/main/EXAMPLES/example1
+        # https://github.com/soilwise-he/soil-observation-data-encodings/tree/main/EXAMPLES/example2
+        # https://github.com/soilwise-he/soil-observation-data-encodings/tree/main/EXAMPLES/example3
+        # https://github.com/soilwise-he/soil-observation-data-encodings/tree/main/EXAMPLES/example4
+        # https://github.com/soilwise-he/soil-observation-data-encodings/tree/main/EXAMPLES/example5/meetpunten_bodemlocatie_2021-032627_1912_CN_SWC
+
+        #######################################################
         filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
         filtered_extensions_zip = ['.zip']
         filtered_extensions_context = ['.doc', '.docx', '.pdf', '.md', '.txt']
@@ -1217,7 +1339,7 @@ with col2:
     myinfo = st.empty()
     metadata_file = st.file_uploader("Upload metadata (CSV or JSON TableSchema/CSVW)", type=['csv', 'json'], key='meta_upload')
     if 'metadata_df' not in st.session_state or metadata_file is None:
-            myinfo.info("The metadata file is optional but should be a tabular data file with at least a **'name'** column that matches the headers of the uploaded data file. Optionally, it can include columns such as **'datatype'**, **'element'**, **'unit'**, **'method'**, and **'description'** for additional annotations.")
+            myinfo.info("The metadata file is optional but should be a tabular data file with at least a **'name'** column that matches the headers of the uploaded data file. Optionally, it can include columns such as **'resulttype'**, **'concept'**, **'unit'**, **'method'**, and **'description'** for additional annotations.")
 
 # Handle linked mode linking columns
 if mode == 'linked' and site_df is not None and obs_df is not None:
@@ -1240,6 +1362,8 @@ if mode == 'linked' and site_df is not None and obs_df is not None:
 meta_key = f"metadata_df"
 if meta_key not in st.session_state or not isinstance(st.session_state.get(meta_key), dict):
     st.session_state[meta_key] = {}
+else:
+    st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 
 
 
@@ -1425,9 +1549,9 @@ if tabular_dict:
                             original_metadata_df,
                             width='stretch',
                             key=f"editor_{key}",
-                            disabled=[col for col in all_columns if col != "datatype" and col != "dateTime format"],
+                            disabled=[col for col in all_columns if col != "resulttype" and col != "resultformat"],
                             column_config={
-                                "datatype": st.column_config.SelectboxColumn(
+                                "resulttype": st.column_config.SelectboxColumn(
                                     options=DATA_TYPE_OPTIONS,
                                 ),
                             }, 

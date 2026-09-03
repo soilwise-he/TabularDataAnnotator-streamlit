@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unit of Measurement Annotation Page
 
 Steps:
@@ -17,7 +17,7 @@ import os
 import re
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_cache_button
 from pylatexenc.latex2text import LatexNodes2Text
-from util.metadata import apply_new_metadata_info
+from util.metadata import apply_new_metadata_info, normalize_metadata_columns
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 add_Soilwise_logo()
@@ -45,8 +45,31 @@ DATA_TYPE_OPTIONS_UoM = [
 ]
 
 meta_key = f"metadata_df"
+if isinstance(st.session_state.get(meta_key), dict):
+    st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 
 # -------------------- Helper data and functions --------------------
+
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
+
 
 @st.cache_data
 def load_qudt_data():
@@ -169,7 +192,7 @@ def rank_unit_results(
         "http://qudt.org/vocab/sou/SI", regex=False
     )
 
-    # TODO: Check if multiplies one is actualy working. Is if susceptible for string error?
+    # TODO: Check if multiplies one is actualy working. Is it susceptible for string error?
     ranked["_priority_multiplier_one"] = ranked["conversionMultiplier"].apply(_conversion_multiplier_is_one)
 
     ranked = ranked.sort_values(
@@ -296,7 +319,7 @@ def get_numeric_variables(metadata_dict: Dict) -> Dict[str, List[str]]:
     """Get all numeric variables from metadata"""
     numeric_vars = {}
     for table_key, df in metadata_dict.items():
-        numeric_cols = df[df["datatype"] == "numeric"]
+        numeric_cols = df[df["resulttype"] == "numeric"]
         numeric_vars[table_key] = numeric_cols["name"].tolist()
     return numeric_vars
 
@@ -332,13 +355,13 @@ def _normalize_qudt_text(value: str) -> str:
     # Use token-aware replacements of known aliases.
     alias_patterns = {
         r"\b(?:yr|yrs|year|years)\b": "a",
-        "²": "2",
-        "³": "3",
+        "�": "2",
+        "�": "3",
     }
     for pattern, replacement in alias_patterns.items():
         normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
 
-    for character in ["-1","-", "_", "/", "(", ")", "[", "]", ".", ",", "·","^"," "]:
+    for character in ["-1","-", "_", "/", "(", ")", "[", "]", ".", ",", "�","^"," "]:
         normalized = normalized.replace(character, "")
     return "".join(normalized.split())
 
@@ -622,7 +645,7 @@ def translate_QUDT(df: pd.DataFrame, qudt_reference: pd.DataFrame) -> pd.DataFra
 
 # PIN -------------------- UI --------------------
 
-st.title("📐 Unit of Measurement Annotation")
+st.title("?? Unit of Measurement Annotation")
 
 
 st.markdown("""
@@ -650,16 +673,16 @@ if "uom_manual_conversion" not in st.session_state:
     st.session_state["uom_manual_conversion"] = {}
 
 
-st.markdown("#### 🔍 Search & Select Units from QUDT")
+st.markdown("#### ?? Search & Select Units from QUDT")
 
 # Verify that required data is available
 if meta_key not in st.session_state or st.session_state.get(meta_key) is None:
-    st.info("📋 No metadata found. Please upload a data file in step 1 to proceed with unit annotation.")
+    st.info("?? No metadata found. Please upload a data file in step 1 to proceed with unit annotation.")
     st.stop()
 
 qudt_df = st.session_state["qudt_data"]
 if qudt_df.empty:
-    st.error("❌ QUDT data is not available. Cannot proceed with unit annotation.")
+    st.error("? QUDT data is not available. Cannot proceed with unit annotation.")
     st.stop()
 
 
@@ -667,6 +690,14 @@ if qudt_df.empty:
 # Create one tab per key
 tab_labels = list(st.session_state[meta_key].keys())
 tabs = st.tabs(tab_labels)
+
+_EXCLUDED_ELEMENTS = {
+    "sosa:FeatureOfInterest",
+    "ssn:Property",
+    "geo:Feature",
+    "sosa:phenomenonTime",
+    "sosa:resultTime",
+}
 
 
 for tab, key in zip(tabs, tab_labels):
@@ -676,12 +707,21 @@ for tab, key in zip(tabs, tab_labels):
 
         # st.divider()
         
-        # Get numeric columns (CSVW types for which a UoM is meaningful)
+        # Skip UoM annotation for excluded semantic elements, mirroring keyword matching.
         meta_df = st.session_state[meta_key][key]
-        numeric_cols = meta_df[meta_df["datatype"].isin(DATA_TYPE_OPTIONS_UoM) | meta_df["element"].isin(["sosa:observedProperty"])]
+        meta_df_for_uom = meta_df
+        if "concept" in meta_df.columns:
+            element_values = meta_df["concept"].astype(str).str.strip()
+            meta_df_for_uom = meta_df[~element_values.isin(_EXCLUDED_ELEMENTS)]
+
+        # Get numeric columns (CSVW types for which a UoM is meaningful)
+        numeric_mask = meta_df_for_uom["resulttype"].isin(DATA_TYPE_OPTIONS_UoM)
+        if "concept" in meta_df_for_uom.columns:
+            numeric_mask |= meta_df_for_uom["concept"].isin(["sosa:observedProperty"])
+        numeric_cols = meta_df_for_uom[numeric_mask]
         
         if numeric_cols.empty:
-            st.info(f"ℹ️ No numeric variables found in **{key}**. Only numeric variables require unit annotations.")
+            st.info(f"?? No numeric Observational Properties found in **{key}**. Only these features require unit annotations.")
             continue
         
         # Initialize uom_selections for this table if not already done
@@ -724,7 +764,7 @@ for tab, key in zip(tabs, tab_labels):
             guesses_df = pd.DataFrame(guesses_summary)
             guesses_qudt_df = translate_QUDT(guesses_df, qudt_df)
 
-            # with st.expander("🛠️ Debug QUDT guesses", expanded=False):
+            # with st.expander("??? Debug QUDT guesses", expanded=False):
             #     st.markdown("#### Raw guesses")
             #     st.dataframe(guesses_df, width='stretch')
 
@@ -749,7 +789,7 @@ for tab, key in zip(tabs, tab_labels):
                 var_name = row["name"]
                 var_description = row["description"] if "description" in row else row["name"]
 
-                with st.expander(f"📊 {var_name}", expanded=False):
+                with st.expander(f"?? {var_name}", expanded=False):
                     st.markdown(f"**Description:** {var_description}")
                     suggested_kind_uris = get_suggested_quantity_kinds_for_variable(guesses_qudt_df, var_name)
                     suggested_unit_uris = get_suggested_units_for_variable(guesses_qudt_df, var_name)
@@ -800,7 +840,7 @@ for tab, key in zip(tabs, tab_labels):
                                 auto_select_idx = search_results.index.get_loc(guess_rows.index[0])
                         
                         if len(search_results)==cap_results:
-                            st.markdown(f"⚠️ Search results capped at {cap_results}. Please refine your search term or quantity kind selection to see more specific results.")
+                            st.markdown(f"?? Search results capped at {cap_results}. Please refine your search term or quantity kind selection to see more specific results.")
                         else:    
                             st.markdown(f"**Found {len(search_results)} results:**")                   
                         
@@ -830,22 +870,22 @@ for tab, key in zip(tabs, tab_labels):
                                 if key in st.session_state["suggestion_pending"] and var_name in st.session_state["suggestion_pending"][key]:
                                     del st.session_state["suggestion_pending"][key][var_name]
                             
-                            st.success(f"✅ {var_name} → {selected['label']}")
+                            st.success(f"? {var_name} ? {selected['label']}")
                         else:
                             if var_name in st.session_state["uom_selections"][key]:
                                 del st.session_state["uom_selections"][key][var_name]
                     else:
-                            st.warning("⚠️ No matching units found. Try a different search term. Or deselect quantity kind filters to broaden the search.")
+                            st.warning("?? No matching units found. Try a different search term. Or deselect quantity kind filters to broaden the search.")
                     
                     # --- Last-resort manual conversion override ---
-                    with st.expander("⚙️ Advanced: manual conversion override", expanded=False):
+                    with st.expander("?? Advanced: manual conversion override", expanded=False):
                         st.caption(
                             "Only use this if your unit is not in QUDT and consider contributing to this open repository yourself. "
                             "In the meantime, we are trying to provide a temporary solution using the method described below. \n\n  "
                             "STEPS TO USE: \n\n"
                             "1. Select the unit that is closest to yours (e.g., if you have 'hectares' and find 'square meters', select 'square meters'). \n\n"
                             "2. Define how the column's raw values relate to the selected unit: \n\n"
-                            "   `converted = raw × multiplier + offset`."
+                            "   `converted = raw � multiplier + offset`."
                         )
                         conv_key_prefix = f"conv_{key}_{var_name}"
 
@@ -881,7 +921,7 @@ for tab, key in zip(tabs, tab_labels):
 
                         if conv_enabled:
                             if conv_multiplier == 0:
-                                st.warning("⚠️ A multiplier of 0 will collapse all values to the offset.")
+                                st.warning("?? A multiplier of 0 will collapse all values to the offset.")
                             st.session_state["uom_manual_conversion"][key][var_name] = {
                                 "multiplier": conv_multiplier,
                                 "offset": conv_offset,
@@ -905,7 +945,7 @@ for tab, key in zip(tabs, tab_labels):
                         col1, col2, col3, col4, col5 = st.columns([2,2,3,3,4])
                         with col1:
                             if st.button(
-                                "✅ Approve",
+                                "? Approve",
                                 key=f"approve_{key}_{var_name}",
                                 width='stretch',
                             ):
@@ -913,7 +953,7 @@ for tab, key in zip(tabs, tab_labels):
                                 st.session_state["suggestion_pending"][key][var_name] = "approved"
                                 st.rerun()
                         with col2:
-                            st.markdown("**🔍 SUGGESTED**")
+                            st.markdown("**?? SUGGESTED**")
                         with col3:
                             st.write(f"**Unit:** {selected['label']}")
                         with col4:
@@ -925,7 +965,7 @@ for tab, key in zip(tabs, tab_labels):
                         # Show normal confirmed selection
                         col1, col2, col3, col4, col5 = st.columns([2,2,3,3,4])
                         with col2:
-                            st.markdown("**➡️ SELECTED:**   ")
+                            st.markdown("**?? SELECTED:**   ")
                         with col3:
                             st.write(f"**Unit:** {selected['label']}")
                         with col4:
@@ -938,7 +978,7 @@ for tab, key in zip(tabs, tab_labels):
                     conv_info = st.session_state.get("uom_manual_conversion", {}).get(key, {}).get(var_name)
                     if conv_info:
                         st.caption(
-                            f"⚙️ Manual conversion: × {conv_info['multiplier']} + {conv_info['offset']}"
+                            f"?? Manual conversion: � {conv_info['multiplier']} + {conv_info['offset']}"
                         )
 
                     st.space('small')
@@ -946,9 +986,9 @@ for tab, key in zip(tabs, tab_labels):
                     with col_feedback:
                         feedback_key = f"feedback_{key}_{var_name}"
                         if is_suggestion_pending:
-                            icon_feedback = "❓"
+                            icon_feedback = "?"
                         else:
-                            icon_feedback = "✅"
+                            icon_feedback = "?"
 
                         if var_name in st.session_state["uom_selections"][key]:
                             st.write(icon_feedback) 
@@ -962,12 +1002,12 @@ for tab, key in zip(tabs, tab_labels):
         if pending_vars:
             st.space('medium')
             if st.button(
-                f"✅ Approve All ({len(pending_vars)} pending suggestion{'s' if len(pending_vars) != 1 else ''})",
+                f"? Approve All ({len(pending_vars)} pending suggestion{'s' if len(pending_vars) != 1 else ''})",
                 key=f"approve_all_{key}",
                 help=(
-                    "We're genuinely flattered by your trust in our robot overlords — truly, it warms our circuits. "
+                    "We're genuinely flattered by your trust in our robot overlords � truly, it warms our circuits. "
                     "Please always give the suggestions above a quick sanity check first. "
-                    "Your data will thank you. 🙏"
+                    "Your data will thank you. ??"
                 ),
             ):
                 for var_name in pending_vars:
@@ -1018,7 +1058,7 @@ for key, metadata in st.session_state["uom_selections"].items():
 
 # Anchor link to scroll back to the top of the matching section
 st.markdown(
-    '<a href="#qudt-start-anchor" style="text-decoration:none;">⬆ Back to top</a>',
+    '<a href="#qudt-start-anchor" style="text-decoration:none;">? Back to top</a>',
     unsafe_allow_html=True,
 )
 
@@ -1038,7 +1078,7 @@ for tab, key in zip(tabs_selection, tab_labels):
                         
 
         # Summary of selections
-        st.markdown("### 📋 Summary of Selections")
+        st.markdown("### ?? Summary of Selections")
         if key in st.session_state["uom_selections"] and st.session_state["uom_selections"][key]:
             summary_data = []
             for var_name, selection in st.session_state["uom_selections"][key].items():
@@ -1068,7 +1108,7 @@ for tab, key in zip(tabs_selection, tab_labels):
                     progress = len(st.session_state["uom_selections"][key]) / len(numeric_cols) * 100
                     st.metric("Progress", f"{progress:.0f}%")
         else:
-            st.info("ℹ️ No units selected yet. Use the search boxes above to find and select units.")
+            st.info("?? No units selected yet. Use the search boxes above to find and select units.")
 
 
         st.markdown("#### Current state of your metadata table:")
@@ -1076,3 +1116,4 @@ for tab, key in zip(tabs_selection, tab_labels):
 
 # -------------------- reach us --------------------
 add_Soilwise_contact_sidebar()
+

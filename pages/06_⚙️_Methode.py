@@ -1,11 +1,11 @@
-import json
+﻿import json
 import re
 
 import pandas as pd
 import streamlit as st
 
 from ui.blocks import add_Soilwise_contact_sidebar, add_Soilwise_logo, add_clear_cache_button
-from util.metadata import apply_new_metadata_info
+from util.metadata import apply_new_metadata_info, normalize_metadata_columns
 
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
@@ -13,6 +13,8 @@ add_Soilwise_logo()
 add_clear_cache_button(key_prefix="methods_page")
 
 meta_key = "metadata_df"
+if isinstance(st.session_state.get(meta_key), dict):
+	st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 #_EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property"}
 _INCLUDE_ELEMENTS = {"sosa:observedProperty"}
 
@@ -23,6 +25,27 @@ DOI_PATTERN = re.compile(r"\b(10[.][0-9]{3,}(?:[.][0-9]+)*(?:(?![\"&\'])\S)+)\b"
 URL_PATTERN = re.compile(r"https?://[^\s<>)\]}\"]+")
 
 # -------------------- Helper data and functions --------------------
+
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
+
 
 REFERENCE_TYPE_STYLES = {
 	"ISO": {"label": "ISO", "color": "blue" , "icon": ":material/award_star:"},
@@ -275,8 +298,8 @@ for tab, table_key in zip(tabs, tab_labels):
 		table_meta_df = st.session_state[meta_key].get(table_key, pd.DataFrame())
 		ordered_meta_names = table_meta_df["name"].tolist() if "name" in table_meta_df.columns else []
 		excluded_names: set[str] = set()
-		if not table_meta_df.empty and {"name", "element"}.issubset(table_meta_df.columns):
-			element_values = table_meta_df["element"].astype(str).str.strip()
+		if not table_meta_df.empty and {"name", "concept"}.issubset(table_meta_df.columns):
+			element_values = table_meta_df["concept"].astype(str).str.strip()
 			excluded_names = set(
 				table_meta_df.loc[~element_values.isin(_INCLUDE_ELEMENTS), "name"].map(_to_text).str.strip()
 			)
@@ -476,7 +499,7 @@ for _tbl_key, _review_df in st.session_state["method_review_tables"].items():
 	if "method_column" not in _review_df.columns:
 		continue
 	_meta_df = st.session_state[meta_key].get(_tbl_key)
-	if _meta_df is None or "element" not in _meta_df.columns:
+	if _meta_df is None or "concept" not in _meta_df.columns:
 		continue
 	for _, _rev_row in _review_df.iterrows():
 		_method_col_val = _to_text(_rev_row.get("method_column", "")).strip()
@@ -484,7 +507,7 @@ for _tbl_key, _review_df in st.session_state["method_review_tables"].items():
 			continue
 		_mask = _meta_df["name"].map(_to_text).str.strip() == _method_col_val
 		if _mask.any():
-			_meta_df.loc[_mask, "element"] = "sosa:Procedure"
+			_meta_df.loc[_mask, "concept"] = "sosa:Procedure"
 	st.session_state[meta_key][_tbl_key] = _meta_df
 
 
@@ -497,4 +520,5 @@ for tab, table_key in zip(meta_tabs, st.session_state[meta_key].keys()):
 
 # -------------------- reach us --------------------
 add_Soilwise_contact_sidebar()
+
 

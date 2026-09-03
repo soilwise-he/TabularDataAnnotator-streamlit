@@ -19,6 +19,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import yaml
 
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
+from util.metadata import normalize_metadata_columns
 
 from csvwlib import CSVWConverter
 
@@ -29,6 +30,8 @@ add_Soilwise_logo()
 add_Soilwise_contact_sidebar()
 add_clear_cache_button(key_prefix="export_page")
 meta_key = "metadata_df"
+if isinstance(st.session_state.get(meta_key), dict):
+    st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 
 st.title("💾 Export Metadata")
 
@@ -40,7 +43,29 @@ Export your annotated metadata in various standardized formats:
 - **MCF YAML**: pygeometa Metadata Control File (ISO 19115 / OGC)
 """)
 
-# -------------  Helper functions ------------- 
+# -------------------- Helper data and functions --------------------
+
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
+
+
 def download_bytes(content: bytes, filename: str, mime: str = 'application/octet-stream'):
     st.download_button(label=f"📥 Download {filename}", data=content, file_name=filename, mime=mime)
 
@@ -57,15 +82,15 @@ def _safe_filename_component(value: str, fallback: str = "export") -> str:
 def _csvw_column_from_row(row):
     col = {"name": row['name']}
 
-    if row.get('concept'):
-        col['titles'] = row['concept']
-
-
     if row.get('element'):
-        col['type'] = row.get('element')
+        col['titles'] = row['element']
 
-        if row.get('concept_uri'):
-            col[row.get('element')] = row.get('concept_uri')
+
+    if row.get('concept'):
+        col['type'] = row.get('concept')
+
+        if row.get('element uri'):
+            col[row.get('concept')] = row.get('element uri')
 
     if row.get('unit'):
         col['schema:unitCode'] = row['unit']
@@ -82,12 +107,12 @@ def _csvw_column_from_row(row):
     
     if row.get('method') and not row['method']=="null":
         col['sosa:usedProcedure'] = row['method']
-    if row.get('datatype'):
-        if row['datatype']  in ['date', 'dateTime', 'time']:
-            date_format = row.get('dateTime format')
-            col['datatype'] = {"base": row['datatype'], "format": date_format} if date_format else row['datatype']
+    if row.get('resulttype'):
+        if row['resulttype']  in ['date', 'dateTime', 'time']:
+            date_format = row.get('resultformat')
+            col['datatype'] = {"base": row['resulttype'], "format": date_format} if date_format else row['resulttype']
         else:
-            col['datatype'] = row['datatype']
+            col['datatype'] = row['resulttype']
     if row.get('description'):
         col['dc:description'] = row['description']
 
@@ -99,7 +124,7 @@ def _build_csvw_table(table_df, url, foreign_keys=None):
     pk = pk_rows["name"].iloc[0] if not pk_rows.empty else None
 
     foi_rows = table_df[
-        table_df.get("element", pd.Series("", index=table_df.index)).astype(str).str.strip()
+        table_df.get("concept", pd.Series("", index=table_df.index)).astype(str).str.strip()
         == "sosa:FeatureOfInterest"
     ]
     foi_column_name = foi_rows["name"].iloc[0] if not foi_rows.empty else None
@@ -196,7 +221,7 @@ def _normalize_table_key(value: str) -> str:
 
 def _looks_like_metadata_df(df: pd.DataFrame) -> bool:
     metadata_columns = {
-        "name", "datatype", "description", "unit_symbol","unit_uri", "method", "element", "concept", "concept_uri", "dateTime format", "quantity kind_uri"
+        "name", "resulttype", "description", "unit_symbol","unit_uri", "method", "concept", "element", "element uri", "resultformat", "quantity kind_uri"
     }
     cols = {str(c).strip().lower() for c in df.columns}
     return "name" in cols and (len(cols & metadata_columns) >= 3)
@@ -627,10 +652,10 @@ def _build_csvw_sosa_table(
     for col in foi_cols:
         row = meta_by_name.get(col, {})
         c: dict = {"name": col, "propertyUrl": "dcterms:identifier"}
-        if row.get("concept"):
-            c["titles"] = str(row["concept"])
-        if row.get("datatype"):
-            c["datatype"] = str(row["datatype"])
+        if row.get("element"):
+            c["titles"] = str(row["element"])
+        if row.get("resulttype"):
+            c["datatype"] = str(row["resulttype"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -645,10 +670,10 @@ def _build_csvw_sosa_table(
             "name": col,
             "propertyUrl": _SPATIAL_ROLE_TO_PROPERTY.get(role, "geo:location") if role else "geo:location",
         }
-        if row.get("concept"):
-            c["titles"] = str(row["concept"])
-        if row.get("datatype"):
-            c["datatype"] = str(row["datatype"])
+        if row.get("element"):
+            c["titles"] = str(row["element"])
+        if row.get("resulttype"):
+            c["datatype"] = str(row["resulttype"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -688,8 +713,8 @@ def _build_csvw_sosa_table(
         if isinstance(role, dict):
             role = next(iter(role.values()), "sosa:phenomenonTime")
         row = meta_by_name.get(col, {})
-        dt  = str(row.get("datatype") or "dateTime")
-        fmt = str(row.get("dateTime format") or "")
+        dt  = str(row.get("resulttype") or "dateTime")
+        fmt = str(row.get("resultformat") or "")
         dt_val = {"base": dt, "format": fmt} if dt in ("date", "dateTime", "time") and fmt else dt
 
         if role == "sosa:resultTime":
@@ -707,13 +732,13 @@ def _build_csvw_sosa_table(
     for col in attr_cols:
         row = meta_by_name.get(col, {})
         c   = {"name": col}
-        prop = str(row.get("concept_uri") or row.get("element") or "").strip()
+        prop = str(row.get("element uri") or row.get("concept") or "").strip()
         if prop:
             c["propertyUrl"] = prop
-        if row.get("concept"):
-            c["titles"] = str(row["concept"])
-        if row.get("datatype"):
-            c["datatype"] = str(row["datatype"])
+        if row.get("element"):
+            c["titles"] = str(row["element"])
+        if row.get("resulttype"):
+            c["datatype"] = str(row["resulttype"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -736,17 +761,17 @@ def _build_csvw_sosa_table(
             "name": obs_col,
             "aboutUrl": qv_about,
             "propertyUrl": "qudt:value",
-            "datatype": str(row.get("datatype") or "number"),
+            "datatype": str(row.get("resulttype") or "number"),
         }
-        if row.get("concept"):
-            c["titles"] = str(row["concept"])
+        if row.get("element"):
+            c["titles"] = str(row["element"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
 
         # Derive annotation URIs
         unit_uri    = str(row.get("unit_uri") or row.get("unit") or "").strip() or None
-        concept_uri = str(row.get("concept_uri") or "").strip() or None
+        concept_uri = str(row.get("element uri") or "").strip() or None
         method_uri  = str(row.get("method") or "").strip()
         if method_uri in ("", "null", "None"):
             method_uri = None
@@ -779,8 +804,8 @@ def _build_csvw_sosa_table(
     # ------------------------------------------------------------------ #
     for tc in result_time_cols:
         row = meta_by_name.get(tc, {})
-        dt  = str(row.get("datatype") or "dateTime")
-        fmt = str(row.get("dateTime format") or "")
+        dt  = str(row.get("resulttype") or "dateTime")
+        fmt = str(row.get("resultformat") or "")
         dt_val = {"base": dt, "format": fmt} if dt in ("date", "dateTime", "time") and fmt else dt
 
         if len(obs_cols) == 1 and foi_col:
@@ -800,8 +825,8 @@ def _build_csvw_sosa_table(
     for col in unsorted_cols:
         row = meta_by_name.get(col, {})
         c   = {"name": col}
-        if row.get("datatype"):
-            c["datatype"] = str(row["datatype"])
+        if row.get("resulttype"):
+            c["datatype"] = str(row["resulttype"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -810,7 +835,7 @@ def _build_csvw_sosa_table(
     # 8. Optional: rdf:type virtual column for FOI node
     # ------------------------------------------------------------------ #
     if foi_col:
-        foi_type = str(meta_by_name.get(foi_col, {}).get("concept_uri") or "").strip()
+        foi_type = str(meta_by_name.get(foi_col, {}).get("element uri") or "").strip()
         if foi_type:
             virtual_cols.insert(0, {
                 "virtual": True,
@@ -965,10 +990,10 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
     attributes = []
     for _, row in metadata_df.iterrows():
         attr: dict = {"name": str(row.get("name", ""))}
-        concept = str(row.get("concept") or row.get("name", "")).strip()
+        concept = str(row.get("element") or row.get("name", "")).strip()
         description = str(row.get("description") or "").strip()
         usedProcedure = str(row.get("method") or "").strip()
-        inforamationRole = str(row.get("element") or "").strip()
+        inforamationRole = str(row.get("concept") or "").strip()
 
         if inforamationRole:
             attr["informationRole"] = inforamationRole
@@ -978,7 +1003,7 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
             attr["abstract"] = {"en": description}
         if usedProcedure:
             attr["usedProcedure"] = usedProcedure
-        raw_type = str(row.get("datatype") or "").lower().strip()
+        raw_type = str(row.get("resulttype") or "").lower().strip()
 
         # TODO: does this realy needs to be mapped?
         if raw_type:
@@ -986,7 +1011,7 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
         unit = str(row.get("unit_uri") or row.get("unit") or "").strip()
         if unit:
             attr["units"] = unit
-        unit_uri = str(row.get("concept_uri") or "").strip()
+        unit_uri = str(row.get("element uri") or "").strip()
         if unit_uri:
             attr["url"] = unit_uri
         attributes.append(attr)
@@ -1064,6 +1089,138 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
     }
     return mcf
 
+
+def _dot_safe_id(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9_]", "_", str(value or ""))
+    return text or "table"
+
+
+def _build_table_link_erd_dot(metadata_by_table: dict, relationships_summary_df: pd.DataFrame) -> str:
+    """Build a Graphviz DOT diagram that visualizes table links in an ERD-like style."""
+    lines = [
+        "digraph ERD {",
+        "  rankdir=LR;",
+        "  graph [fontsize=10, fontname=Helvetica, labelloc=t, splines=polyline, nodesep=0.7, ranksep=1.0];",
+        "  node [shape=record, fontsize=10, fontname=Helvetica, style=rounded];",
+        "  edge [fontsize=9, fontname=Helvetica, color=\"#64748B\", fontcolor=\"#334155\", penwidth=0.8, arrowsize=0.8];",
+    ]
+
+    linked_columns_by_table: dict[str, set[str]] = {}
+    if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
+        edge_style_by_relation = {
+            "one-to-one": {"arrowtail": "tee", "arrowhead": "tee"},
+            "one-to-many": {"arrowtail": "tee", "arrowhead": "crow"},
+            "many-to-one": {"arrowtail": "crow", "arrowhead": "tee"},
+            "many-to-many": {"arrowtail": "crow", "arrowhead": "crow"},
+        }
+
+        for _, row in relationships_summary_df.iterrows():
+            relation = str(row.get("relation", "")).strip()
+            if relation == "not linked":
+                continue
+
+            left_table = row.get("left_table")
+            right_table = row.get("right_table")
+            left_id = str(row.get("left_id") or "").strip()
+            right_id = str(row.get("right_id") or "").strip()
+
+            if left_table and left_id:
+                linked_columns_by_table.setdefault(left_table, set()).add(left_id)
+            if right_table and right_id:
+                linked_columns_by_table.setdefault(right_table, set()).add(right_id)
+
+    table_node_ids = {}
+    for table_key, metadata_df in metadata_by_table.items():
+        node_id = _dot_safe_id(table_key)
+        while node_id in table_node_ids.values():
+            node_id = f"{node_id}_x"
+        table_node_ids[table_key] = node_id
+
+        linked_cols = sorted(linked_columns_by_table.get(table_key, set()))
+        max_cols = 4
+        visible_cols = linked_cols[:max_cols]
+        if len(linked_cols) > max_cols:
+            visible_cols.append("...")
+
+        col_block = "\\l".join(visible_cols) + ("\\l" if visible_cols else "")
+        table_label = str(table_key).replace('"', '\\"')
+        label = f"{{{table_label}|Linked keys\\l{col_block}}}" if col_block else f"{{{table_label}}}"
+        lines.append(f'  "{node_id}" [label="{label}"];')
+
+    if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
+        for _, row in relationships_summary_df.iterrows():
+            relation = str(row.get("relation", "")).strip()
+            if relation == "not linked":
+                continue
+
+            left_table = row.get("left_table")
+            right_table = row.get("right_table")
+            left_id = str(row.get("left_id") or "").strip()
+            right_id = str(row.get("right_id") or "").strip()
+
+            if left_table not in table_node_ids or right_table not in table_node_ids:
+                continue
+
+            cardinality = {
+                "one-to-one": "1:1",
+                "one-to-many": "1:N",
+                "many-to-one": "N:1",
+                "many-to-many": "N:N",
+            }.get(relation, relation)
+
+            edge_label = f"{left_id} -> {right_id} [{cardinality}]" if left_id and right_id else cardinality
+            edge_label = edge_label.replace('"', '\\"')
+            edge_style = edge_style_by_relation.get(relation, {"arrowtail": "none", "arrowhead": "normal"})
+
+            lines.append(
+                f'  "{table_node_ids[left_table]}" -> "{table_node_ids[right_table]}" '
+                f'[dir=both, arrowtail={edge_style["arrowtail"]}, arrowhead={edge_style["arrowhead"]}, label="{edge_label}", labeldistance=1.2];'
+            )
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _is_preview_empty(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, float) and pd.isna(value):
+        return True
+    return False
+
+
+def _prune_empty_preview_values(value):
+    """Recursively remove null/empty values from preview payloads."""
+    if isinstance(value, dict):
+        pruned = {}
+        for key, item in value.items():
+            cleaned = _prune_empty_preview_values(item)
+            if cleaned is None:
+                continue
+            if isinstance(cleaned, (dict, list, tuple, set)) and len(cleaned) == 0:
+                continue
+            pruned[key] = cleaned
+        return pruned if pruned else None
+
+    if isinstance(value, list):
+        pruned = [item for item in (_prune_empty_preview_values(v) for v in value) if item is not None]
+        return pruned if pruned else None
+
+    if isinstance(value, tuple):
+        pruned = tuple(item for item in (_prune_empty_preview_values(v) for v in value) if item is not None)
+        return pruned if pruned else None
+
+    if isinstance(value, set):
+        pruned = {item for item in (_prune_empty_preview_values(v) for v in value) if item is not None}
+        return pruned if pruned else None
+
+    if _is_preview_empty(value):
+        return None
+
+    return value
+
 # ==================== START UI ====================
 
 # Check if metadata exists in session state
@@ -1077,9 +1234,33 @@ for tab, table_key in zip(meta_tabs, st.session_state[meta_key].keys()):
     with tab:
         metadata_df = st.session_state[meta_key][table_key]
         st.dataframe(metadata_df, width='stretch')
-        c_1, c_2 = st.columns([1,1])
-        c_2.json(st.session_state["spatial_deepdive"][table_key])
-        c_1.dataframe(st.session_state["temporal_deepdive"][table_key])
+
+        spatial_info_raw = st.session_state.get("spatial_deepdive", {}).get(table_key)
+        temporal_info = st.session_state.get("temporal_deepdive", {}).get(table_key)
+        spatial_info = _prune_empty_preview_values(spatial_info_raw)
+
+        has_spatial = spatial_info is not None
+        has_temporal = temporal_info is not None and (
+            (isinstance(temporal_info, (dict, list, tuple, set, str)) and len(temporal_info) > 0)
+            or (isinstance(temporal_info, pd.DataFrame) and not temporal_info.empty)
+        )
+
+        if has_spatial or has_temporal:
+            c_1, c_2 = st.columns([1, 1])
+            if has_temporal:
+                c_1.dataframe(temporal_info)
+            if has_spatial:
+                c_2.json(spatial_info)
+
+
+relationships_summary_df = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
+if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
+    with st.expander("### Table Linking Summary ", expanded=False):
+        erd_dot = _build_table_link_erd_dot(st.session_state[meta_key], relationships_summary_df)
+        st.graphviz_chart(erd_dot, use_container_width=False)
+
+# else:
+#     st.info("No table-linking summary found yet. Configure links on the Linking Tables page to include them here.")
 
 st.divider()
 st.markdown("### Export Options")
@@ -1127,16 +1308,16 @@ if st.button("Generate TableSchema JSON", key="tableschema_button"):
     schema = {"fields": [], "primaryKey": None}
     for _, r in metadata_df.iterrows():
         f = {"name": r['name']}
-        if r.get('datatype'):
-            f['type'] = r['datatype']
+        if r.get('resulttype'):
+            f['type'] = r['resulttype']
         if r.get('description'):
             f['description'] = r['description']
         if r.get('unit'):
             f['unit'] = r['unit']
         if r.get('method'):
             f['method'] = r['method']
-        if r.get('element'):
-            f['title'] = r['element']
+        if r.get('concept'):
+            f['title'] = r['concept']
         schema['fields'].append(f)
     
     st.json(schema, expanded=True)
@@ -1391,3 +1572,5 @@ st.info("""
 
 All formats preserve your metadata annotations and are ready for FAIR data publication.
 """)
+
+

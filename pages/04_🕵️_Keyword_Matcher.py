@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import io
 import json
@@ -16,7 +16,7 @@ from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_c
 from pathlib import Path
 from typing import Optional, Sequence, Union
 from collections import defaultdict
-from util.metadata import apply_new_metadata_info
+from util.metadata import apply_new_metadata_info, normalize_metadata_columns
 
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
@@ -24,11 +24,33 @@ add_Soilwise_logo()
 add_clear_cache_button(key_prefix="Keyword_Matcher")
 
 meta_key = f"metadata_df"
+if isinstance(st.session_state.get(meta_key), dict):
+    st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 
 # -------------------- Helper data and functions --------------------
 
 
-#BUG: General bug "Sourcefile" still in sourcelist of the vocab list !!!
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
+
+#BUG: General bug "Sourcefile" still in sourcelist of the vocab list !!! => Temp fix; hardcoded filter to remove "Sourcefile" from the list of unique sources in the vocab matching tab.
 
 
 
@@ -82,12 +104,12 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                 for f in j['fields']:
                     rows.append({
                         'name': f.get('name'),
-                        'datatype': f.get('type') or '',
+                        'resulttype': f.get('type') or '',
                         'description': f.get('description') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'concept': f.get('title') or '',
-                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
+                        'element': f.get('title') or '',
+                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             # CSVW style
@@ -96,12 +118,12 @@ def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
                 for f in j['tableSchema']['columns']:
                     rows.append({
                         'name': f.get('name'),
-                        'datatype': f.get('datatype') or '',
+                        'resulttype': f.get('datatype') or f.get('resulttype') or '',
                         'description': f.get('null') or '',
                         'unit': f.get('unit') or '',
                         'method': f.get('method') or '',
-                        'concept': (f.get('titles') or [''])[0],
-                        'concept_uri': f.get('element_uri') or f.get('concept_uri') or ''
+                        'element': (f.get('titles') or [''])[0],
+                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
                     })
                 return pd.DataFrame(rows)
             st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
@@ -756,11 +778,11 @@ def _render_vocab_tab(key):
             })
             summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
 
-        # summary_df["concept_uri"] = summary_df.apply(
+        # summary_df["element uri"] = summary_df.apply(
         #     lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
         #     axis=1,
         # )
-        summary_df["concept_uri"] = summary_df["uri"].apply(lambda x: x[0] if x else "")
+        summary_df["element uri"] = summary_df["uri"].apply(lambda x: x[0] if x else "")
 
         summary_df["query"] = pd.Categorical(
             summary_df["query"], categories=unique_queries, ordered=True
@@ -773,11 +795,11 @@ def _render_vocab_tab(key):
             column_config={
                 "query": st.column_config.TextColumn(label="variable"),
                 "uri": st.column_config.LinkColumn(),
-                "concept_uri": None,
+                "element uri": None,
             },
         )
 
-        summary_df = summary_df.rename(columns={"query": "name", "label": "concept"})
+        summary_df = summary_df.rename(columns={"query": "name", "label": "element"})
         st.session_state['metadata_df'] = apply_new_metadata_info(
             {key: summary_df}, st.session_state['metadata_df'], overwrite='yes_incl_blanks'
         )
@@ -801,12 +823,13 @@ def _render_vocab_tab(key):
 st.title("🕵️ STEP 3 : Keyword Matching")
 
 st.markdown("""
-This step links your column names to standardised vocabulary terms from scientific thesauri (e.g. ANSIS, AGROVOC, QUDT).
+This step links your column names to standardised vocabulary terms from scientific thesauri (e.g. ANSIS, AGROVOC, GLOSIS).
 
 **How it works:**
 1. Select the vocabulary **sources** you want to select from, this can also be adapted later.
-2. Click **Find Vocabulary Terms In Thesaurus**. The tool uses a semantic embedding model to find the closest matching terms for each variable.
-3. For each variable, review the suggested matches and pick the best one (or enter a custom URI).
+2. Click **Find Vocabulary Terms In Thesaurus**. The tool uses a semantic embedding model to find the closest matching terms (nearest neighbors) for each variable.
+3. For each variable, review the suggested matches and pick the best one (or enter a custom URI). You have the option to get more suggestions by increasing the number of nearest neighbors.
+4. If none of the suggestions are suitable, you can select "None (no match)" to indicate that no match was found. Please consider in this case to contact a domain expert to add the missing concept to a vocabulary. This will increase the FAIRness of your dataset and help the community.
 
 
 > ⚠️ **Important:** Variable descriptions (added in Step 2) are practically essential for good matching. Short or cryptic column names alone are rarely enough. The model blends the variable name *and* its description when searching, and without a description the results are often too generic to be useful.
@@ -826,7 +849,11 @@ else:
 
     
     index_vocabs, dict_vocabs = load_vocab_indexes(modelname = modelname)
-    unique_sources = {v.get("source") for v in dict_vocabs.values() if v.get("source")}
+    unique_sources = {
+        v.get("source")
+        for v in dict_vocabs.values()
+        if v.get("source") and str(v.get("source")).strip().lower() != "sourcefile"
+    }
 
     vocab_list = [v["label"] for v in dict_vocabs.values() if "label" in v]
 
@@ -852,13 +879,13 @@ else:
 
     if st.button("Find Vocabulary Terms In Thesaury"):
 
-        _EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property"}
+        _EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property", "geo:Feature", "sosa:phenomenonTime", "sosa:resultTime"}
 
         for key, meta_df in meta_dict.items():
             meta_df_for_matching = meta_df
-            if "element" in meta_df.columns:
+            if "concept" in meta_df.columns:
                 # Skip matching for columns already typed as FOI or Attribute.
-                element_values = meta_df["element"].astype(str).str.strip()
+                element_values = meta_df["concept"].astype(str).str.strip()
                 meta_df_for_matching = meta_df[~element_values.isin(_EXCLUDED_ELEMENTS)]
 
             

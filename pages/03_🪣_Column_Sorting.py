@@ -28,6 +28,30 @@ BUCKET_NAMES = [
     "Temporal",
 ]
 
+
+# -------------------- Helper data and functions --------------------
+
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
+
+
 # --------------- gather column names from all loaded tables ---------------
 meta_key = "metadata_df"
 meta_dict = st.session_state.get(meta_key)
@@ -46,7 +70,7 @@ for table_name, df in meta_dict.items():
         if col_name not in cols:
             cols.append(col_name)
             _col_meta[table_name][col_name] = {
-                "datatype": str(row.get("datatype", "")).lower(),
+                "resulttype": str(row.get("resulttype", "")).lower(),
                 "name": col_name.lower(),
                 "description": str(row.get("description", "")).lower(),
             }
@@ -85,7 +109,7 @@ if not _table_columns:
 _TEMPORAL_DTYPES = {"date", "datetime", "time", "datetimestamp", "gday", "gyear", "gmonth", "gyearmonth", "gmonthday"}
 
 _SPATIAL_X_PATTERN = re.compile(
-    r"\b(easting|longitude|lon|lng|x_coord|xcoord|x_pos|xpos)\b"
+    r"\b(easting|longitude|lon|lng|long|x_coord|xcoord|x_pos|xpos)\b"
     r"|(?<![a-z])x(?![a-z])",
     re.IGNORECASE,
 )
@@ -164,7 +188,7 @@ def _guess_spatial_role(col_name: str) -> str:
 def _guess_bucket(info: dict) -> str:
     """Return the best-guess bucket name for a column based on its metadata."""
 
-    if info["datatype"] in _TEMPORAL_DTYPES:
+    if info["resulttype"] in _TEMPORAL_DTYPES:
         return "Temporal"
 
     if _SPATIAL_PATTERN.search(info["name"]) or _SPATIAL_PATTERN.search(info["description"]):
@@ -453,7 +477,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                         )
                     fit_value = f"{date_val.isoformat()}T{time_val.strftime('%H:%M')}"
                 # 
-                # BUG: seconds con't be input properly
+                # BUG: seconds can't be input properly
                 # else:
                 #     dt_date_col, dt_time_col = st.columns(2)
                 #     with dt_date_col:
@@ -662,7 +686,7 @@ for tab, tbl in zip(_tabs, tab_labels):
 
         # --- getting information in session state ---
 
-        # Write bucket assignments into the 'element' column of metadata_df
+        # Write bucket assignments into the 'concept' column of metadata_df
         _BUCKET_TO_URI = {
             "Feature of Interest (FOI) - ID": "sosa:FeatureOfInterest",
             "Observed Property": "sosa:observedProperty",
@@ -683,7 +707,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                 continue
             for col in bucket_cols:
                 col_to_uri[col] = uri
-        meta_df["element"] = meta_df["name"].map(col_to_uri).fillna("")
+        meta_df["concept"] = meta_df["name"].map(col_to_uri).fillna("")
         st.session_state[meta_key][tbl] = meta_df
 
         # --- Derive temporal extent ---
