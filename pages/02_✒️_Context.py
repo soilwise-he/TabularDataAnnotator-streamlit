@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import json
 from datetime import datetime
@@ -16,7 +16,7 @@ from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_c
 from dataclasses import dataclass
 from urllib.parse import urlparse
 from io import BytesIO
-from util.metadata import apply_new_metadata_info
+from util.metadata import apply_new_metadata_info, normalize_metadata_columns
 
 
 from docx import Document
@@ -31,6 +31,8 @@ add_clear_cache_button(key_prefix="description_page")
 
 # st.markdown("## DEBUG INPUT")
 meta_key = f"metadata_df"
+if isinstance(st.session_state.get(meta_key), dict):
+    st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 # st.json(st.session_state[meta_key])
 # st.json(st.session_state)
 # st.markdown("## END DEBUG INPUT")
@@ -38,6 +40,26 @@ meta_key = f"metadata_df"
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 # -------------------- Helper data and functions --------------------
+
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
 
 @dataclass
 class ContextFile:

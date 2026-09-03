@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from ui.blocks import add_Soilwise_contact_sidebar, add_Soilwise_logo, add_clear_cache_button
+from util.metadata import normalize_metadata_columns
 
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
@@ -14,6 +15,9 @@ add_clear_cache_button(key_prefix="linking_tables_page")
 
 meta_key = "metadata_df"
 data_key = "tabular_data_dict"
+
+if isinstance(st.session_state.get(meta_key), dict):
+	st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 
 RELATION_OPTIONS = [
 	"not linked",
@@ -41,6 +45,28 @@ TYPE_PREFERENCE = {
 PROFILE_SAMPLE_LIMIT = 5000
 OVERLAP_SAMPLE_LIMIT = 20000
 
+
+# -------------------- Helper data and functions --------------------
+
+st.markdown("""
+    <style>
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            height: 50px;
+            background-color: #F0F2F6;
+            border-radius: 4px 4px 0px 0px;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background-color: #FFFBF1;
+        }
+
+    </style>""", unsafe_allow_html=True)
 
 def _to_text(value) -> str:
 	if value is None:
@@ -322,6 +348,19 @@ def _get_table_columns(metadata_df: pd.DataFrame) -> list[str]:
 
 
 st.title("🔗 Linking Tables")
+
+
+# Data preview for each table
+preview_tables = st.session_state.get("tabular_data_dict_preview", {})
+if preview_tables:
+	with st.expander("Recap Data", expanded=False):
+		table_names = list(preview_tables.keys())
+		table_tabs = st.tabs([f"{table_name}" for table_name in table_names])
+		for tab, table_name in zip(table_tabs, table_names):
+			with tab:
+				st.dataframe(preview_tables[table_name], width="stretch")
+
+	
 st.markdown(
 	"""
 Define how tables relate to each other.
@@ -494,3 +533,4 @@ st.session_state["table_relationships_summary_df"] = summary_df.copy()
 
 # -------------------- reach us --------------------
 add_Soilwise_contact_sidebar()
+
