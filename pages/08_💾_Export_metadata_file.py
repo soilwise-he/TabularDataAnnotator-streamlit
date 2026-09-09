@@ -1221,6 +1221,65 @@ def _prune_empty_preview_values(value):
 
     return value
 
+
+def _is_meaningful_fit_value(value) -> bool:
+    if value is None:
+        return False
+    if pd.isna(value):
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return False
+        if stripped == "0":
+            return False
+        return True
+    try:
+        return float(value) != 0.0
+    except (TypeError, ValueError):
+        return True
+
+
+def _build_fit_for_all_export_rows() -> list[dict]:
+    """Collect fit-for-all temporal and spatial defaults for export as a single CSV."""
+    rows: list[dict] = []
+    column_buckets = st.session_state.get("column_buckets", {})
+    temporal_deepdive = st.session_state.get("temporal_deepdive", {})
+    temporal_precision = st.session_state.get("temporal_precision", {})
+    spatial_deepdive = st.session_state.get("spatial_deepdive", {})
+
+    for table_key in column_buckets:
+        temporal_fit_all = temporal_deepdive.get(table_key, {}).get("__fit_for_all__")
+        if isinstance(temporal_fit_all, dict):
+            for temporal_value, temporal_type in temporal_fit_all.items():
+                if not _is_meaningful_fit_value(temporal_value):
+                    continue
+                rows.append({
+                    "table": table_key,
+                    "kind": "temporal",
+                    "value": temporal_value,
+                    "type": temporal_type,
+                    "precision": temporal_precision.get(table_key, {}).get("__fit_for_all__", ""),
+                })
+
+        spatial_fit_all = spatial_deepdive.get(table_key, {}).get("__fit_for_all__")
+        if isinstance(spatial_fit_all, dict):
+            meaningful_spatial = {
+                spatial_key: spatial_value
+                for spatial_key, spatial_value in spatial_fit_all.items()
+                if _is_meaningful_fit_value(spatial_value)
+            }
+            if meaningful_spatial:
+                rows.append({
+                    "table": table_key,
+                    "kind": "spatial",
+                    "value": json.dumps(meaningful_spatial, ensure_ascii=False),
+                    "type": "",
+                    "precision": "",
+                })
+
+    return rows
+
 # ==================== START UI ====================
 
 # Check if metadata exists in session state
@@ -1280,6 +1339,11 @@ for table_key, metadata_df in st.session_state[meta_key].items():
     metadata_df.copy().to_csv(csv_buf, index=False)
     csv_payloads[f'{safe_table_key}_metadata.csv'] = csv_buf.getvalue().encode('utf-8')
 
+fit_for_all_rows = _build_fit_for_all_export_rows()
+if fit_for_all_rows:
+    fit_for_all_df = pd.DataFrame(fit_for_all_rows)
+    csv_payloads['fit_for_all_temporal_spatial.csv'] = fit_for_all_df.to_csv(index=False).encode('utf-8')
+
 if len(csv_payloads) > 1:
     column_zip, column_individual = st.columns([2,5])
     # Primary action: download all metadata CSV files as a single ZIP archive.
@@ -1297,6 +1361,9 @@ if len(csv_payloads) > 1:
 else:
     for export_filename, export_bytes in csv_payloads.items():
         download_bytes(export_bytes, export_filename, 'text/csv')
+
+if not fit_for_all_rows:
+    st.caption("No fit-for-all temporal or spatial defaults have been recorded yet.")
 
 st.divider()
 
