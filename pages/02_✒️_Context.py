@@ -765,7 +765,9 @@ else:
                                                     st.session_state.get("metadata_df"),
                                                     overwrite='yes'
                                                     )
-                st.rerun() # Not uptimal, but necessary to update the edited df in session_state. Bug is know in streamlit community
+                # st.data_editor already triggers a rerun on interaction.
+                # Avoid forcing a second rerun because it causes UI flicker
+                # and resets tab selection to the first tab.
 
     st.markdown("### Augmented variable descriptions")
     with st.expander("Need some LLM help?", expanded=False):
@@ -1053,7 +1055,9 @@ else:
                 
                         if not edited_AI_Var.equals(AI_var_df):
                             st.session_state["AI_var_descriptions"][key] = edited_AI_Var
-                            st.rerun() # Not uptimal, but necessary to update the edited df in session_state. Bug is know in streamlit community
+                            # st.data_editor already triggers a rerun on interaction.
+                            # Avoid forcing a second rerun because it causes UI flicker
+                            # and resets tab selection to the first tab.
                 approve_AI = st.button("✅⏬ Approve and overwrite description with generated content", key="copy_AI_descriptions_button")
                 if approve_AI:
                     # overwrite descriptions in main metadata df
