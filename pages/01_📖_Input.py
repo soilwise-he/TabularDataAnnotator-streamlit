@@ -77,6 +77,8 @@ SESSION_RESET_PREFIXES = [
     "move_to_context_",
 ]
 
+GITHUB_INGEST_SCHEMA_VERSION = "v2-path-keys"
+
 
 def _clear_dependent_session_state_for_new_input():
     preserve_zenodo_cache_key = st.session_state.get("_active_zenodo_cache_key")
@@ -851,6 +853,49 @@ def request_file_from_github(url: str) -> tuple[Optional[requests.Response], Opt
     ext_file = os.path.splitext(name_file)[1].lower()
     return file_response, name_file, ext_file, raw_url
 
+
+def _extract_github_scope_path(github_input_url: str) -> Optional[str]:
+    """Return folder scope path from a GitHub tree URL (if present)."""
+    try:
+        parsed = urlparse(github_input_url)
+        if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+            return None
+
+        parts = [p for p in parsed.path.split("/") if p]
+        # github.com/{owner}/{repo}/tree/{branch}/{path...}
+        if len(parts) >= 5 and parts[2] == "tree":
+            return "/".join(parts[4:]).strip("/")
+    except Exception:
+        return None
+    return None
+
+
+def build_github_table_key(raw_url: str, source_url: Optional[str] = None, sheet_name: Optional[str] = None) -> str:
+    """Create concise, collision-safe table keys for GitHub imports.
+
+    If a folder URL was provided, keys are relative to that folder.
+    """
+    parsed = urlparse(raw_url)
+    parts = [p for p in parsed.path.split("/") if p]
+
+    # raw.githubusercontent.com/{owner}/{repo}/{branch}/{path...}
+    if parsed.netloc.lower() == "raw.githubusercontent.com" and len(parts) >= 5:
+        rel_path = "/".join(parts[3:])
+
+        scope_path = _extract_github_scope_path(source_url) if source_url else None
+        if scope_path:
+            scope_prefix = f"{scope_path}/"
+            if rel_path == scope_path:
+                rel_path = filename_from_url(raw_url)
+            elif rel_path.startswith(scope_prefix):
+                rel_path = rel_path[len(scope_prefix):]
+
+        base_key = rel_path
+    else:
+        base_key = filename_from_url(raw_url)
+
+    return f"{base_key} | {sheet_name}" if sheet_name else base_key
+
 def get_excel(excel_file):
     xls = pd.ExcelFile(excel_file)
     sheets = xls.sheet_names
@@ -1105,7 +1150,7 @@ with col1:
                 _github_urls = normalized_urls
                 for gh_url in _github_urls:
                     upload_tokens.append(f"github:{gh_url}")
-                github_cache_seed = "|".join(sorted(_github_urls))
+                github_cache_seed = "|".join(sorted(_github_urls) + [GITHUB_INGEST_SCHEMA_VERSION])
                 github_cache_digest = hashlib.sha256(github_cache_seed.encode("utf-8")).hexdigest()
                 st.session_state["_active_github_cache_key"] = f"_github_ingest_cache_{github_cache_digest}"
             else:
@@ -1261,7 +1306,7 @@ if _need_processing:
         filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
         filtered_extensions_zip = ['.zip']
         filtered_extensions_context = ['.doc', '.docx', '.pdf', '.md', '.txt']
-        github_cache_seed = "|".join(sorted(_github_urls))
+        github_cache_seed = "|".join(sorted(_github_urls) + [GITHUB_INGEST_SCHEMA_VERSION])
         github_cache_key = st.session_state.get("_active_github_cache_key") or f"_github_ingest_cache_{hashlib.sha256(github_cache_seed.encode('utf-8')).hexdigest()}"
         cached_github = st.session_state.get(github_cache_key)
 
@@ -1304,12 +1349,14 @@ if _need_processing:
                         bitesIO.name = name_file
                         df_dict = get_excel(bitesIO)
                         for sheet_name, df in df_dict.items():
-                            tabular_dict[f"{name_file} | {sheet_name}"] = df
-                            filename_dict[f"{name_file} | {sheet_name}"] = raw_url
+                            table_key = build_github_table_key(raw_url, source_url=github_input_url, sheet_name=sheet_name)
+                            tabular_dict[table_key] = df
+                            filename_dict[table_key] = raw_url
                     elif ext_file == '.csv':
                         uploaded_df = read_csvBytes_with_sniffer(file_response.content)
-                        tabular_dict[name_file] = uploaded_df
-                        filename_dict[name_file] = raw_url
+                        table_key = build_github_table_key(raw_url, source_url=github_input_url)
+                        tabular_dict[table_key] = uploaded_df
+                        filename_dict[table_key] = raw_url
                     elif ext_file in filtered_extensions_zip:
                         process_zip_from_url(raw_url,
                                                 tabular_dict,
