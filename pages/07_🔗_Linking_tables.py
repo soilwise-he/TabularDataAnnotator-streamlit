@@ -20,7 +20,7 @@ if isinstance(st.session_state.get(meta_key), dict):
 	st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
 
 RELATION_OPTIONS = [
-	"not linked",
+	"not-linked",
 	"one-to-one",
 	"one-to-many",
 	"many-to-one",
@@ -28,7 +28,7 @@ RELATION_OPTIONS = [
 ]
 
 RELATION_ARROW = {
-	"not linked": "∅",
+	"not-linked": "∅",
 	"one-to-one": "1 ↔ 1",
 	"one-to-many": "1 → N",
 	"many-to-one": "N → 1",
@@ -71,9 +71,19 @@ st.markdown("""
 def _to_text(value) -> str:
 	if value is None:
 		return ""
-	if isinstance(value, float) and pd.isna(value):
-		return ""
+	try:
+		if pd.isna(value):
+			return ""
+	except (TypeError, ValueError):
+		pass
 	return str(value)
+
+
+def _normalized_text_series(series: pd.Series | None) -> pd.Series:
+	if series is None:
+		return pd.Series(dtype="object")
+	values = [_to_text(value).strip() for value in series.dropna().tolist()]
+	return pd.Series([value for value in values if value], dtype="object")
 
 
 def _normalize_name(value: str) -> str:
@@ -116,8 +126,7 @@ def _clean_series(series: pd.Series) -> pd.Series:
 	if series is None:
 		return pd.Series(dtype="object")
 	if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
-		cleaned = series.map(_to_text).str.strip()
-		return cleaned[cleaned != ""]
+		return _normalized_text_series(series)
 	return series.dropna()
 
 
@@ -135,8 +144,7 @@ def _clean_series_sample(series: pd.Series | None, sample_limit: int | None = No
 	if raw_sample.empty:
 		return raw_sample
 	if pd.api.types.is_object_dtype(raw_sample) or pd.api.types.is_string_dtype(raw_sample):
-		cleaned = raw_sample.map(_to_text).str.strip()
-		return cleaned[cleaned != ""]
+		return _normalized_text_series(raw_sample)
 	return raw_sample
 
 
@@ -198,8 +206,8 @@ def _column_profile(df: pd.DataFrame | None, column_name: str) -> dict:
 def _value_overlap_metrics(left_df: pd.DataFrame | None, left_column: str, right_df: pd.DataFrame | None, right_column: str) -> tuple[float, int]:
 	if left_df is None or right_df is None or left_column not in left_df.columns or right_column not in right_df.columns:
 		return 0.0, 0
-	left_values = set(_clean_series(left_df[left_column]).map(_to_text).str.strip())
-	right_values = set(_clean_series(right_df[right_column]).map(_to_text).str.strip())
+	left_values = set(_normalized_text_series(_clean_series(left_df[left_column])))
+	right_values = set(_normalized_text_series(_clean_series(right_df[right_column])))
 	left_values.discard("")
 	right_values.discard("")
 	if not left_values or not right_values:
@@ -213,7 +221,7 @@ def _column_value_set(df: pd.DataFrame | None, column_name: str) -> set[str]:
 	if df is None or column_name not in df.columns:
 		return set()
 	cleaned = _clean_series_sample(df[column_name], OVERLAP_SAMPLE_LIMIT)
-	values = set(cleaned.map(_to_text).str.strip())
+	values = set(_normalized_text_series(cleaned))
 	values.discard("")
 	return values
 
@@ -246,7 +254,7 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 		best_suggestion = {
 			"left_id": "",
 			"right_id": "",
-			"relation": "not linked",
+			"relation": "not-linked",
 			"score": -1.0,
 			"reason": "",
 		}
@@ -313,7 +321,7 @@ def _find_table_relationships(left_table: str, right_table: str, table_columns: 
 			return {
 				"left_id": "",
 				"right_id": "",
-				"relation": "not linked",
+				"relation": "not-linked",
 				"score": 0.0,
 				"reason": "",
 				"timing": { #debug
@@ -382,18 +390,23 @@ if len(table_keys) < 2:
 	st.stop()
 
 FOI_ID_BUCKET = "Feature of Interest (FOI) - ID"
+UNSORTED_BUCKET = "Unsorted"
 column_buckets = st.session_state.get("column_buckets", {})
 
 table_columns = {
-	table_key: column_buckets.get(table_key, {}).get(FOI_ID_BUCKET, [])
+	table_key: list(dict.fromkeys(
+		column_buckets.get(table_key, {}).get(FOI_ID_BUCKET, [])
+		+ column_buckets.get(table_key, {}).get(UNSORTED_BUCKET, [])
+	))
 	for table_key in table_keys
 }
 
 if not any(table_columns.values()):
 	st.info(
-		"No columns are marked as **Feature of Interest (FOI) - ID** yet. "
-		"Go to the **Column Sorting** page and drag at least one column into the "
-		"*Feature of Interest (FOI) - ID* bucket for each table that you want to link."
+		"No candidate ID columns are available yet. "
+		"Go to the **Column Sorting** page and place at least one column in the "
+		"*Feature of Interest (FOI) - ID* bucket, or leave a suitable identifier in the "
+		"*Unsorted* bucket, for each table that you want to link."
 	)
 	st.stop()
 
@@ -410,7 +423,7 @@ for left_table, right_table in table_pairs:
 	suggested_link = _find_table_relationships(left_table, right_table, table_columns, data_dict)
 	#st.write(suggested_link["timing"]) # debug speed
 	default_relation = stored_relationship.get("relation", suggested_link["relation"])
-	# Use last_left_id/last_right_id so the selection survives a round-trip through "not linked"
+	# Use last_left_id/last_right_id so the selection survives a round-trip through "not-linked"
 	default_left_id = stored_relationship.get("last_left_id") or stored_relationship.get("left_id") or suggested_link["left_id"]
 	default_right_id = stored_relationship.get("last_right_id") or stored_relationship.get("right_id") or suggested_link["right_id"]
 
@@ -448,7 +461,7 @@ for left_table, right_table in table_pairs:
 		header_right.markdown(f"#### {right_table}")
 
 
-		if relation == "not linked":
+		if relation == "not-linked":
 			left_id = ""
 			right_id = ""
 		else:
@@ -478,7 +491,7 @@ for left_table, right_table in table_pairs:
 				key=f"right_id_{pair_key}",
 			)
 
-		if relation != "not linked" and suggested_link["left_id"] and suggested_link["right_id"]:
+		if relation != "not-linked" and suggested_link["left_id"] and suggested_link["right_id"]:
 			st.caption(
 				f"Suggested link: {suggested_link['left_id']} {RELATION_ARROW.get(suggested_link['relation'], '↔')} {suggested_link['right_id']}"
 				+ (f" based on {suggested_link['reason']}." if suggested_link["reason"] else ".")
@@ -494,7 +507,7 @@ for left_table, right_table in table_pairs:
 		# 		f"scoring {timing['scoring_seconds']}s, "
 		# 		f"total {timing['total_seconds']}s"
 		# 	)
-		if relation != "not linked" and (not left_id or not right_id):
+		if relation != "not-linked" and (not left_id or not right_id):
 			st.warning("This pair has a relation but no left/right id selected.")
 
 		relationship_record = {

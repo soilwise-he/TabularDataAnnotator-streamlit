@@ -1,5 +1,6 @@
 from cProfile import label
 import re
+import os
 from datetime import date, datetime, timedelta
 import requests
 import pandas as pd
@@ -7,11 +8,14 @@ import streamlit as st
 import hashlib, json
 from streamlit_sortables import sort_items
 from ui.blocks import add_Soilwise_logo, add_clear_cache_button
+from util.metadata import normalize_metadata_columns
 
 add_Soilwise_logo()
 add_clear_cache_button(key_prefix="column_sorting_page")
 
-st.set_page_config(page_title="Column Sorting", layout="wide")
+st.set_page_config(page_title="Column Sorting",
+                   layout="wide",
+                   initial_sidebar_state='collapsed')
 
 st.title("🪣 Sort Columns into Buckets")
 st.markdown(
@@ -54,6 +58,9 @@ st.markdown("""
 
 # --------------- gather column names from all loaded tables ---------------
 meta_key = "metadata_df"
+if isinstance(st.session_state.get(meta_key), dict):
+    st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
+
 meta_dict = st.session_state.get(meta_key)
 if not meta_dict:
     st.warning("⚠️ No data loaded yet. Please go to the **Input** page first and upload a dataset.")
@@ -70,9 +77,10 @@ for table_name, df in meta_dict.items():
         if col_name not in cols:
             cols.append(col_name)
             _col_meta[table_name][col_name] = {
-                "resulttype": str(row.get("resulttype", "")).lower(),
+                "column_type": str(row.get("column_type", "")).lower(),
                 "name": col_name.lower(),
                 "description": str(row.get("description", "")).lower(),
+                "concept_type": str(row.get("concept_type", "")).strip(),
             }
     _table_columns[table_name] = cols
 
@@ -149,6 +157,20 @@ _SPATIAL_PATTERN = re.compile(
 )
 
 
+def _secret_or_env(secret_group: str, secret_name: str, env_names: list[str]) -> str:
+    """Return configured secret value, or first non-empty environment fallback."""
+    secret_value = st.secrets.get(secret_group, {}).get(secret_name)
+    if secret_value:
+        return secret_value
+
+    for env_name in env_names:
+        env_value = os.getenv(env_name)
+        if env_value:
+            return env_value
+
+    return ""
+
+
 @st.cache_data(show_spinner=False)
 def _check_epsg(code: int, api_key: str) -> tuple[bool | None, str]:
     """Validate an EPSG code via the MapTiler Coordinates API.
@@ -185,10 +207,48 @@ def _guess_spatial_role(col_name: str) -> str:
     return None
 
 
+_BUCKET_TO_URI = {
+    "Feature of Interest (FOI) - ID": "sosa:FeatureOfInterest",
+    "Observed Property": "sosa:Property",
+    "FOI - Spatial Information": "geo:Feature",
+    "FOI - Attribute": "schema:Property",
+}
+
+#"geo": "http://www.w3.org/2003/01/geo/wgs84_pos#",
+_SPATIAL_ROLE_TO_PROPERTY = {
+    "X": "geo:long",
+    "Y": "geo:lat",
+    "Z": "geo:alt",
+    "WKT geometry": "geo:asWKT",
+    "BBOX": "geo:asWKT",
+}
+
+_URI_TO_BUCKET = {uri: bucket for bucket, uri in _BUCKET_TO_URI.items()}
+for temporal_uri in ["sosa:phenomenonTime", "sosa:resultTime"]:
+    _URI_TO_BUCKET[temporal_uri] = "Temporal"
+
+
+def _bucket_from_concept(concept: str | None) -> str | None:
+    """Map an already-known concept URI back to a bucket when metadata was preloaded."""
+    if not concept:
+        return None
+    normalized = str(concept).strip()
+    return _URI_TO_BUCKET.get(normalized)
+
+
+def _preferred_bucket_for_column(tbl: str, col_name: str) -> str:
+    """Prefer preloaded concept metadata when available; otherwise use heuristics."""
+    info = _col_meta.get(tbl, {}).get(col_name, {})
+    concept_bucket = _bucket_from_concept(info.get("concept_type"))
+    if concept_bucket:
+        return concept_bucket
+    return _guess_bucket(info)
+
+
 def _guess_bucket(info: dict) -> str:
     """Return the best-guess bucket name for a column based on its metadata."""
 
-    if info["resulttype"] in _TEMPORAL_DTYPES:
+    if info["column_type"] in _TEMPORAL_DTYPES:
         return "Temporal"
 
     if _SPATIAL_PATTERN.search(info["name"]) or _SPATIAL_PATTERN.search(info["description"]):
@@ -205,15 +265,16 @@ def _guess_bucket(info: dict) -> str:
     return "FOI - Attribute"
 
 # --------------- initialise buckets in session state (per table) ---------------
+
 if "column_buckets" not in st.session_state:
     st.session_state["column_buckets"] = {}
 
 for tbl, cols in _table_columns.items():
     if tbl not in st.session_state["column_buckets"]:
-        # First time: auto-guess
+        # Prefer already-loaded metadata concepts, otherwise fall back to heuristics.
         buckets = {b: [] for b in BUCKET_NAMES}
         for col in cols:
-            bucket = _guess_bucket(_col_meta[tbl][col])
+            bucket = _preferred_bucket_for_column(tbl, col)
             buckets[bucket].append(col)
 
         # Keep only the leftmost FOI-ID match; demote the rest to Unsorted.
@@ -234,7 +295,7 @@ for tbl, cols in _table_columns.items():
 
         st.session_state["column_buckets"][tbl] = buckets
     else:
-        # Sync: add new columns, remove stale ones
+        # Sync: add new columns, remove stale ones while respecting preloaded metadata.
         existing = {
             item
             for bucket_items in st.session_state["column_buckets"][tbl].values()
@@ -242,7 +303,8 @@ for tbl, cols in _table_columns.items():
         }
         for col in cols:
             if col not in existing:
-                st.session_state["column_buckets"][tbl]["Unsorted"].append(col)
+                preferred_bucket = _preferred_bucket_for_column(tbl, col)
+                st.session_state["column_buckets"][tbl][preferred_bucket].append(col)
         col_set = set(cols)
         for bucket in st.session_state["column_buckets"][tbl]:
             st.session_state["column_buckets"][tbl][bucket] = [
@@ -268,7 +330,7 @@ _TEMPORAL_PRECISION = {
 # BUCKET_NAMES order (div:nth-of-type skips the injected <style> element):
 # 1=Unsorted, 2=FOI-ID, 3=FOI-Spatial, 4=FOI-Attribute, 5=ObservedProperty, 6=Temporal
 _BUCKET_HINTS = {
-    2: "Including primary keys columns \A and foreign keys columns",
+    2: "Including primary_keys columns \A and foreign keys columns",
     4: "Descriptive attribute (e.g. country)",
     5: "Observation, requiring more \A information like unit and/or \A procedure (e.g. temperature)",
 }
@@ -296,7 +358,6 @@ _tabs = st.tabs(tab_labels)
 for tab, tbl in zip(_tabs, tab_labels):
     with tab:
         tbl_buckets = st.session_state["column_buckets"][tbl]
-
         items = [
             {"header": bucket, "items": tbl_buckets[bucket]}
             for bucket in BUCKET_NAMES
@@ -404,7 +465,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                 fit_precision = st.selectbox(
                     "Datetime format input",
                     help = "indicate the format of the temporal column(s) in this table, if you want to apply a fit-for-all format for parsing timestamps. This will be applied to all columns in the 'Temporal' bucket that don't have an individual format specified above.",
-                    options=list(_TEMPORAL_PRECISION.keys()),
+                    options=list(_TEMPORAL_PRECISION.keys()) + ["Freeform"],
                     index=list(_TEMPORAL_PRECISION.keys()).index("DateTime (minute)"),
                     key=f"temporal_fit_for_all_precision_{tbl}",
                     disabled=no_information_selected,
@@ -476,6 +537,22 @@ for tab, tbl in zip(_tabs, tab_labels):
                             disabled=no_information_selected,
                         )
                     fit_value = f"{date_val.isoformat()}T{time_val.strftime('%H:%M')}"
+                elif fit_precision == "Freeform":
+                    fit_value = st.text_input(
+                        "DateTime value (freeform)",
+                        value="",
+                        placeholder="2026-09-16T14:30",
+                        key=f"temporal_fit_for_all_value_freeform_{tbl}",
+                        disabled=no_information_selected,
+                    ).strip()
+                    fit_format = st.text_input(
+                        "Datetime format (freeform)",
+                        value="%Y-%m-%dT%H:%M",
+                        placeholder="%Y-%m-%dT%H:%M",
+                        help="Use a strptime/ISO-style format string, e.g. %Y-%m-%d or %Y-%m-%dT%H:%M.",
+                        key=f"temporal_fit_for_all_format_freeform_{tbl}",
+                        disabled=no_information_selected,
+                    ).strip()
                 # 
                 # BUG: seconds can't be input properly
                 # else:
@@ -496,13 +573,14 @@ for tab, tbl in zip(_tabs, tab_labels):
                 #     fit_value = f"{date_val.isoformat()}T{time_val.strftime('%H:%M:%S')}"
 
                 if not no_information_selected:
-                    fit_format = _TEMPORAL_PRECISION[fit_precision]
+                    if fit_precision != "Freeform":
+                        fit_format = _TEMPORAL_PRECISION[fit_precision]
                     st.caption(f"Check: `{fit_value}` | Format: `{fit_format}`")
 
                     st.session_state["temporal_deepdive"][tbl]["__fit_for_all__"] = {
                         fit_value: fit_for_all_type
                     }
-                    st.session_state["temporal_precision"][tbl]["__fit_for_all__"] = fit_precision
+                    st.session_state["temporal_precision"][tbl]["__fit_for_all__"] = fit_format
 
         
         # --- Spatial sub-type selection ---
@@ -666,7 +744,7 @@ for tab, tbl in zip(_tabs, tab_labels):
                     st.session_state["spatial_fit_for_all"][tbl][spatial_feature] = fit
 
                     if "reference system" in spatial_feature and fit:
-                        _maptiler_key = st.secrets.get("MAPTILER", {}).get("api_key", "")
+                        _maptiler_key = _secret_or_env("MAPTILER", "api_key", ["MAPTILER_API_KEY", "MAPTILER_KEY"])
                         _epsg_valid, _epsg_name = _check_epsg(int(fit), _maptiler_key)
                         if _epsg_valid is True:
                             set_unassigned_columns[i].caption(f"✅ [{_epsg_name}](https://epsg.io/{int(fit)})")
@@ -686,13 +764,7 @@ for tab, tbl in zip(_tabs, tab_labels):
 
         # --- getting information in session state ---
 
-        # Write bucket assignments into the 'concept' column of metadata_df
-        _BUCKET_TO_URI = {
-            "Feature of Interest (FOI) - ID": "sosa:FeatureOfInterest",
-            "Observed Property": "sosa:observedProperty",
-            "FOI - Spatial Information": "geo:Feature",
-            "FOI - Attribute": "ssn:Property",
-        }
+        # Write bucket assignments into the 'concept_type' column of metadata_df.
         meta_df = st.session_state[meta_key][tbl]
         col_to_uri = {}
         for bucket, bucket_cols in tbl_buckets.items():
@@ -707,7 +779,37 @@ for tab, tbl in zip(_tabs, tab_labels):
                 continue
             for col in bucket_cols:
                 col_to_uri[col] = uri
-        meta_df["concept"] = meta_df["name"].map(col_to_uri).fillna("")
+        existing_concepts_type = meta_df["concept_type"].astype(str).str.strip()
+        mapped_concepts = meta_df["name"].map(col_to_uri)
+        meta_df["concept_type"] = mapped_concepts.fillna(existing_concepts_type)
+        meta_df["concept_type"] = meta_df["concept_type"].astype(str).str.strip()
+
+        # Persist selected spatial roles and map them to semantic geo properties.
+        if "spatial_types" not in st.session_state:
+            st.session_state["spatial_types"] = {}
+        spatial_role_by_col = {
+            col: st.session_state.get("spatial_deepdive", {}).get(tbl, {}).get(col)
+            for col in tbl_buckets.get("FOI - Spatial Information", [])
+        }
+        st.session_state["spatial_types"][tbl] = {
+            col: role for col, role in spatial_role_by_col.items() if role
+        }
+
+        mapped_spatial_roles = meta_df["name"].map(spatial_role_by_col)
+        spatial_mask = mapped_spatial_roles.notna()
+        if spatial_mask.any():
+            mapped_spatial_properties = mapped_spatial_roles.map(_SPATIAL_ROLE_TO_PROPERTY)
+
+            # For selected spatial columns: concept is the selected role label.
+            meta_df.loc[spatial_mask, "concept"] = mapped_spatial_roles.loc[spatial_mask].astype(str).str.strip()
+
+            # For selected spatial columns: concept_uri is mapped geo property,
+            # or blank if the role has no direct URI mapping (e.g. reference systems).
+            meta_df.loc[spatial_mask, "concept_uri"] = mapped_spatial_properties.loc[spatial_mask].fillna("").astype(str)
+
+            meta_df["concept"] = meta_df["concept"].astype(str).str.strip()
+            meta_df["concept_uri"] = meta_df["concept_uri"].astype(str).str.strip()
+
         st.session_state[meta_key][tbl] = meta_df
 
         # --- Derive temporal extent ---
@@ -763,33 +865,30 @@ def _is_meaningful_fit_value(value) -> bool:
 for tbl in st.session_state.get("column_buckets", {}):
     temporal_fit_all = st.session_state.get("temporal_deepdive", {}).get(tbl, {}).get("__fit_for_all__")
     temporal_precision = st.session_state.get("temporal_precision", {}).get(tbl, {}).get("__fit_for_all__")
+    temporal_format = _TEMPORAL_PRECISION.get(temporal_precision, temporal_precision or "")
     if temporal_fit_all:
         temporal_value, temporal_type = next(iter(temporal_fit_all.items()))
         if _is_meaningful_fit_value(temporal_value):
             fit_for_all_rows.append({
                 "table": tbl,
                 "kind": "temporal",
+                "key": temporal_type,
                 "value": temporal_value,
-                "type": temporal_type,
-                "precision": temporal_precision or "",
+                "format": temporal_format,
             })
 
     spatial_fit_all = st.session_state.get("spatial_deepdive", {}).get(tbl, {}).get("__fit_for_all__")
     if spatial_fit_all:
-        spatial_fit_all = {
-            spatial_key: spatial_value
-            for spatial_key, spatial_value in spatial_fit_all.items()
-            if _is_meaningful_fit_value(spatial_value)
-        }
-        if not spatial_fit_all:
-            continue
-        fit_for_all_rows.append({
-            "table": tbl,
-            "kind": "spatial",
-            "value": json.dumps(spatial_fit_all, ensure_ascii=False),
-            "type": "",
-            "precision": "",
-        })
+        for spatial_key, spatial_value in spatial_fit_all.items():
+            if not _is_meaningful_fit_value(spatial_value):
+                continue
+            fit_for_all_rows.append({
+                "table": tbl,
+                "kind": "spatial",
+                "key": spatial_key,
+                "value": spatial_value,
+                "format": "",
+            })
 
 if fit_for_all_rows:
     st.markdown("---")

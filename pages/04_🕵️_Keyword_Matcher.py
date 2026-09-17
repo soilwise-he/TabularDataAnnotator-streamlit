@@ -76,89 +76,12 @@ def read_csv_with_sniffer(uploaded_file) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(text), sep=separator_uploaded)
     return df
 
-@st.cache_resource
-def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
-    # Accept CSV or JSON (tableschema or csvw)
-    name = uploaded_file.name.lower()
-
-    #text = uploaded_file.getvalue().decode("utf-8")
-    raw = uploaded_file.getvalue()
-    
-    try:
-        if name.endswith('.csv'):
-            df = read_csv_with_sniffer(uploaded_file)
-            st.write(df.head())
-            # Expect columns: name, element, unit, method, datatype, description
-            if "name" not in df.columns:
-                st.error("CSV metadata must contain a 'name' column matching column names in the data.")
-                return None
-            # Normalize
-            result = df.rename(columns={c: c.lower() for c in df.columns})
-            return result
-        elif name.endswith('.json'):
-            text = raw.decode("utf-8")
-            j = json.loads(text)
-            # TableSchema style
-            if isinstance(j, dict) and j.get('fields'):
-                rows = []
-                for f in j['fields']:
-                    rows.append({
-                        'name': f.get('name'),
-                        'resulttype': f.get('type') or '',
-                        'description': f.get('description') or '',
-                        'unit': f.get('unit') or '',
-                        'method': f.get('method') or '',
-                        'element': f.get('title') or '',
-                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
-                    })
-                return pd.DataFrame(rows)
-            # CSVW style
-            if isinstance(j, dict) and j.get('tableSchema') and j['tableSchema'].get('columns'):
-                rows = []
-                for f in j['tableSchema']['columns']:
-                    rows.append({
-                        'name': f.get('name'),
-                        'resulttype': f.get('datatype') or f.get('resulttype') or '',
-                        'description': f.get('null') or '',
-                        'unit': f.get('unit') or '',
-                        'method': f.get('method') or '',
-                        'element': (f.get('titles') or [''])[0],
-                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
-                    })
-                return pd.DataFrame(rows)
-            st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
-            return None
-        else:
-            st.error('Unsupported metadata file type. Upload a CSV or JSON.')
-            return None
-    except Exception as e:
-        st.error(f'Failed to parse metadata file: {e}')
-        return None
-
-
-
 
 def download_bytes(content: bytes, filename: str, mime: str = 'application/octet-stream'):
     st.download_button(label=f"Download {filename}", data=content, file_name=filename, mime=mime)
 
 CACHE_FILE = "data/openai_cache.json"
 
-
-
-# Init Apertus client
-def create_apertus_client(api_key: str):
-
-    if not api_key:
-        st.warning("No Apertus API key found in st.secrets['apertus']['api_key']")
-        return None
-
-    sess = requests.Session()    
-    sess.headers.update({
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "User-Agent": "SoilWise_Streamlit_annotator/0.1.0"
-    })
-    return sess
 
 
 # Cache Management for optimal LLM usage
@@ -275,53 +198,6 @@ def get_response_Apertus(prompt: str) -> str:
 
 #     return Apertus_tokenizer.decode(output_ids, skip_special_tokens=True)
 
-
-def generate_descriptions_with_LLM(var_list: List[str], context: str, human_description: Dict) -> Dict[str, str]:
-    if not human_description is None:
-        # Use human descriptions as hints
-        var_list = [f"{var} (hint: {human_description.get(var, '')})" for var in var_list]
-    prompt = f"""
-    You are given a list of variables from a CSV file and some contextual documentation. For some variables, a hint will be given.
-    Context:\n{context[:30000]}
-    
-    Variables: {var_list}
-    
-    
-    Return a JSON object where each key is a variable name and each value is a concise, factual definition (1–2 sentences) derived from the context. Use neutral, scientific language that describes *what the variable represents* or *how it is measured*, without inferring purpose, function, or evaluation. If the context does not provide enough information, make an educated guess based only on naming conventions and scientific norms, while remaining neutral.
-    """
-
-    # Check cache before calling OpenAI
-    cached = get_cached_result(context, var_list, provider_selected)
-    raw_output = None
-    if cached:
-        st.info(f"✅ Found cached result (version {cached['version']}, saved {cached['timestamp']})")
-        raw_output = cached["response"]
-    else:
-
-        with st.spinner(f"🪶 The gnomes are working in colaboration with {provider_selected}..."):
-            callfunc = LLM_selection_info.get(provider_selected, {}).get("callfunction")
-            raw_output = callfunc(prompt)
-
-
-        store_result(context, var_list, raw_output,provider_selected)
-        st.success("✅ Saved new response to cache")
-        
-        # st.subheader("Raw OpenAI Output")
-        # st.text_area("Raw Response", raw_output, height=300)
-        
-    if raw_output:
-        st.session_state["raw_output"] = raw_output  # Save raw output        
-        # --- Try to parse JSON ---
-        try:
-
-            variable_descriptions = parse_openai_json(raw_output)
-            st.session_state["variable_descriptions"] = variable_descriptions
-
-
-        except json.JSONDecodeError:
-            st.error("Failed to parse JSON. Please check the raw response above.")
-
-    return variable_descriptions
 
 @st.cache_data(show_spinner=False)
 def load_sentence_model(modelname="all-MiniLM-L6-v2"):
@@ -573,6 +449,40 @@ def make_blank_hit_smart(query, hits, force_keys=("query", "source")):
     blank["query"] = query
     return blank
 
+
+def _clear_vocab_widget_state_for_table(table_key: str) -> None:
+    """Clear widget/session keys that are scoped to one matcher table tab."""
+    key_text = str(table_key)
+    for state_key in list(st.session_state.keys()):
+        if (
+            state_key.startswith(f"radio_{key_text}_")
+            or state_key.startswith(f"custom_uri_{key_text}_")
+            or state_key.startswith(f"k_nearest_{key_text}_")
+            or state_key == f"_sel_hash_{key_text}"
+        ):
+            del st.session_state[state_key]
+
+
+def _prune_vocab_state_for_removed_tables(active_table_keys: set[str]) -> None:
+    """Drop stale matcher state for tables that no longer exist in metadata."""
+    dict_state_keys = [
+        "vocab_oversized_matching_results",
+        "vocab_matching_results",
+        "vocab_row_selection",
+        "vocab_row_selection_status",
+        "vocab_custom_uri",
+        "df_selection_keywords",
+    ]
+
+    for dict_key in dict_state_keys:
+        table_map = st.session_state.get(dict_key)
+        if not isinstance(table_map, dict):
+            continue
+        stale_keys = [k for k in list(table_map.keys()) if str(k) not in active_table_keys]
+        for stale_key in stale_keys:
+            table_map.pop(stale_key, None)
+            _clear_vocab_widget_state_for_table(stale_key)
+
 @st.cache_resource()
 def get_UoM_Ansis_guess(dict_vocab:Dict, dicts_selection:Dict)-> Dict:
     results_dict = defaultdict(dict)
@@ -778,11 +688,11 @@ def _render_vocab_tab(key):
             })
             summary_df = pd.concat([summary_df, df_missing], ignore_index=True)
 
-        # summary_df["element uri"] = summary_df.apply(
+        # summary_df["element_uri"] = summary_df.apply(
         #     lambda row: {label: uri for label, uri in zip(row["label"], row["uri"])},
         #     axis=1,
         # )
-        summary_df["element uri"] = summary_df["uri"].apply(lambda x: x[0] if x else "")
+        summary_df["concept_uri"] = summary_df["uri"].apply(lambda x: x[0] if x else "")
 
         summary_df["query"] = pd.Categorical(
             summary_df["query"], categories=unique_queries, ordered=True
@@ -795,11 +705,11 @@ def _render_vocab_tab(key):
             column_config={
                 "query": st.column_config.TextColumn(label="variable"),
                 "uri": st.column_config.LinkColumn(),
-                "element uri": None,
+                "concept_uri": None,
             },
         )
 
-        summary_df = summary_df.rename(columns={"query": "name", "label": "element"})
+        summary_df = summary_df.rename(columns={"query": "name", "label": "concept"})
         st.session_state['metadata_df'] = apply_new_metadata_info(
             {key: summary_df}, st.session_state['metadata_df'], overwrite='yes_incl_blanks'
         )
@@ -842,6 +752,7 @@ if meta_key not in st.session_state or st.session_state.get(meta_key) is None:
     
 else:
     meta_dict= st.session_state[meta_key]
+    _prune_vocab_state_for_removed_tables({str(k) for k in meta_dict.keys()})
     st.markdown("### Element matcher")
 
     modelname = "models_local/all-MiniLM-L6-v2"
@@ -879,14 +790,28 @@ else:
 
     if st.button("Find Vocabulary Terms In Thesaury"):
 
-        _EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property", "geo:Feature", "sosa:phenomenonTime", "sosa:resultTime"}
+        # _EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "schema:Property", "geo:Feature", "sosa:phenomenonTime", "sosa:resultTime"}
+        _EXCLUDED_ELEMENTS = {"geo:Feature", "sosa:phenomenonTime", "sosa:resultTime"}
 
         for key, meta_df in meta_dict.items():
+            # Force a clean rebuild of tab state for this table on every new run.
+            _clear_vocab_widget_state_for_table(key)
+
             meta_df_for_matching = meta_df
-            if "concept" in meta_df.columns:
-                # Skip matching for columns already typed as FOI or Attribute.
-                element_values = meta_df["concept"].astype(str).str.strip()
-                meta_df_for_matching = meta_df[~element_values.isin(_EXCLUDED_ELEMENTS)]
+            if "concept_type" in meta_df.columns:
+                # Skip excluded role types only when a concept is already present.
+                concept_type_values = meta_df["concept_type"].fillna("").astype(str).str.strip()
+                in_excluded_type = concept_type_values.isin(_EXCLUDED_ELEMENTS)
+
+                concept_values = meta_df.get("concept", pd.Series("", index=meta_df.index)).fillna("").astype(str).str.strip()
+                concept_uri_values = meta_df.get("concept_uri", pd.Series("", index=meta_df.index)).fillna("").astype(str).str.strip()
+
+                empty_tokens = {"", "none", "null", "nan"}
+                has_concept_info = (~concept_values.str.lower().isin(empty_tokens)) | (~concept_uri_values.str.lower().isin(empty_tokens))
+
+                # Keep rows in matcher when concept is still missing, even for geo/time roles.
+                should_skip = in_excluded_type & has_concept_info
+                meta_df_for_matching = meta_df[~should_skip]
 
             
             with st.spinner(f"🔎 Finding nearest vocabulary terms - {key}..."):
