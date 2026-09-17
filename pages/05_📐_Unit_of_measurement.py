@@ -24,16 +24,16 @@ add_Soilwise_logo()
 add_clear_cache_button(key_prefix="Keyword_Matcher")
 
 
-DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
-                     'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
-                     'integer', 'integer', 'long', 'int', 'short', 'byte',
-                     'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
-                     'unsignedInt', 'unsignedShort', 'unsignedByte',
-                     'nonPositiveInteger', 'negativeInteger', 'double',
-                     'number', 'duration', 'dayTimeDuration', 'yearMonthDuration',
-                     'float', 'gDay', 'gMonth', 'gMonthDay', 'gYear', 'gYearMonth',
-                     'hexBinary', 'QName', 'string', 'normalizedString', 'token',
-                     'language', 'Name', 'NMTOKEN', 'time', 'xml', 'html', 'json']
+# DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
+#                      'dateTime', 'datetime', 'dateTimeStamp', 'decimal',
+#                      'integer', 'integer', 'long', 'int', 'short', 'byte',
+#                      'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
+#                      'unsignedInt', 'unsignedShort', 'unsignedByte',
+#                      'nonPositiveInteger', 'negativeInteger', 'double',
+#                      'number', 'duration', 'dayTimeDuration', 'yearMonthDuration',
+#                      'float', 'gDay', 'gMonth', 'gMonthDay', 'gYear', 'gYearMonth',
+#                      'hexBinary', 'QName', 'string', 'normalizedString', 'token',
+#                      'language', 'Name', 'NMTOKEN', 'time', 'xml', 'html', 'json']
 
 # CSVW types for which a unit of measurement is meaningful.
 DATA_TYPE_OPTIONS_UoM = [
@@ -332,7 +332,7 @@ def get_numeric_variables(metadata_dict: Dict) -> Dict[str, List[str]]:
     """Get all numeric variables from metadata"""
     numeric_vars = {}
     for table_key, df in metadata_dict.items():
-        numeric_cols = df[df["resulttype"] == "numeric"]
+        numeric_cols = df[df["column_type"] == "numeric"]
         numeric_vars[table_key] = numeric_cols["name"].tolist()
     return numeric_vars
 
@@ -706,10 +706,11 @@ tabs = st.tabs(tab_labels)
 
 _EXCLUDED_ELEMENTS = {
     "sosa:FeatureOfInterest",
-    "ssn:Property",
+    "schema:Property",
     "geo:Feature",
     "sosa:phenomenonTime",
     "sosa:resultTime",
+    "",
 }
 
 
@@ -723,14 +724,22 @@ for tab, key in zip(tabs, tab_labels):
         # Skip UoM annotation for excluded semantic elements, mirroring keyword matching.
         meta_df = st.session_state[meta_key][key]
         meta_df_for_uom = meta_df
-        if "concept" in meta_df.columns:
-            element_values = meta_df["concept"].astype(str).str.strip()
-            meta_df_for_uom = meta_df[~element_values.isin(_EXCLUDED_ELEMENTS)]
+        if "concept_type" in meta_df.columns:
+            concept_type_values = meta_df["concept_type"].fillna("").astype(str).str.strip()
+            concept_type_values_lower = concept_type_values.str.lower()
+            excluded_concepts_lower = {value.lower() for value in _EXCLUDED_ELEMENTS}
+            meta_df_for_uom = meta_df[~concept_type_values_lower.isin(excluded_concepts_lower)]
 
         # Get numeric columns (CSVW types for which a UoM is meaningful)
-        numeric_mask = meta_df_for_uom["resulttype"].isin(DATA_TYPE_OPTIONS_UoM)
-        if "concept" in meta_df_for_uom.columns:
-            numeric_mask |= meta_df_for_uom["concept"].isin(["sosa:observedProperty"])
+        column_type_values = meta_df_for_uom["column_type"].fillna("").astype(str).str.strip().str.lower()
+        numeric_mask = column_type_values.isin({dtype.lower() for dtype in DATA_TYPE_OPTIONS_UoM})
+        if "concept_type" in meta_df_for_uom.columns:
+            concept_type_values = meta_df_for_uom["concept_type"].fillna("").astype(str).str.strip().str.lower()
+            is_sosa_property = concept_type_values.isin({
+                "sosa:property",
+                "http://www.w3.org/ns/sosa/property",
+            })
+            numeric_mask |= is_sosa_property
         numeric_cols = meta_df_for_uom[numeric_mask]
         
         if numeric_cols.empty:
@@ -1066,7 +1075,7 @@ for key, metadata in st.session_state["uom_selections"].items():
             uom_selections_export[key] = metadata_df[export_cols].rename(columns={
                 "unit": "unit_uri",
                 "symbol": "unit_symbol",
-                "QuantityKind": "quantity kind_uri"
+                "QuantityKind": "quantity_kind_uri"
             })
 
 # Anchor link to scroll back to the top of the matching section

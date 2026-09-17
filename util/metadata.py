@@ -1,3 +1,5 @@
+import os
+import re
 from typing import Dict
 
 import pandas as pd
@@ -5,26 +7,75 @@ import pandas as pd
 import streamlit as st
 
 
+METADATA_EXPORT_FILENAME_SUFFIX = "_metadata.csv"
+
+
 LEGACY_COLUMN_RENAMES = {
-    "datatype": "resulttype",
-    "dateTime format": "resultformat",
-    "concept_uri": "element uri",
+    "datatype": "column_type",
+    "dateTime format": "column_format",
+    "element_uri": "concept_uri",
 }
 
 
 METADATA_COLUMN_ORDER = [
     "name",
-    "resulttype",
-    "resultformat",
+    "column_type",
+    "column_format",
+    "concept_type",
     "concept",
-    "element",
-    "element uri",
+    "concept_uri",
     "unit_symbol",
     "unit_uri",
-    "quantity kind_uri",
+    "quantity_kind_uri",
     "method",
+    "method_uri",
     "description",
 ]
+
+
+def safe_filename_component(value: str, fallback: str = "export") -> str:
+    """Normalize arbitrary text into a filesystem-safe filename component."""
+    text = str(value) if value is not None else ""
+    # Windows-invalid filename chars: <>:"/\\|?* plus control chars.
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+    text = text.strip().strip(".")
+    return text or fallback
+
+
+def build_metadata_export_filename(table_key: str, fallback: str = "table") -> str:
+    """Build canonical metadata export filename for a table key."""
+    return f"{safe_filename_component(table_key, fallback=fallback)}{METADATA_EXPORT_FILENAME_SUFFIX}"
+
+
+def build_filename_match_tokens(value: str) -> set[str]:
+    """Build normalized filename tokens used for table/metadata matching."""
+    raw = str(value or "").strip()
+    base = os.path.basename(raw)
+    variants = {raw, base}
+    tokens: set[str] = set()
+
+    for variant in variants:
+        candidate = str(variant or "").strip().lower()
+        if not candidate:
+            continue
+
+        tokens.add(candidate)
+
+        if candidate.endswith(METADATA_EXPORT_FILENAME_SUFFIX):
+            candidate = candidate[: -len(METADATA_EXPORT_FILENAME_SUFFIX)]
+            if candidate:
+                tokens.add(candidate)
+
+        if candidate.endswith(".csv"):
+            stem = candidate[:-4]
+            if stem:
+                tokens.add(stem)
+
+        safe_candidate = safe_filename_component(candidate, fallback="").lower()
+        if safe_candidate:
+            tokens.add(safe_candidate)
+
+    return tokens
 
 
 def _reorder_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -72,13 +123,13 @@ def normalize_metadata_columns(metadata_dict: Dict) -> Dict:
             if "element" in md.columns and "concept" in md.columns:
                 old_element = md["element"].copy()
                 old_concept = md["concept"].copy()
-                md["element"] = old_concept
+                md["concept_type"] = old_concept
                 md["concept"] = old_element
             elif "element" in md.columns and "concept" not in md.columns:
                 md["concept"] = md["element"]
-                md["element"] = ""
+                md["concept_type"] = ""
             elif "concept" in md.columns and "element" not in md.columns:
-                md["element"] = md["concept"]
+                md["concept_type"] = md["concept"]
                 md["concept"] = ""
 
         md = _reorder_metadata_columns(md)
@@ -101,23 +152,26 @@ def _merge_metadata_rows(
 
         idx = md.index[md["name"] == name][0]
         
-        #TODO: delete fixed column list if no errors occur.
-        #for col in ["datatype","dateTime format", "element", "concept", "unit", "method", "description", "concept_uri", "conversionMultiplier", "conversionOffset"]:
         for col in md.columns:
             # Ensure column exists in the target DataFrame before writing.
             if col not in md.columns:
                 md[col] = None
 
+            source_col = col
+            # Backward compatibility: allow legacy payloads that still use element_uri.
+            if col == "concept_uri" and source_col not in row and "element_uri" in row:
+                source_col = "element_uri"
+
             current_value = md.at[idx, col]
             if overwrite == "no_overwrite" and pd.notna(current_value) and current_value not in [None, ""]:
                 continue
 
-            can_write_value = overwrite == "yes" and col in row and pd.notna(row[col]) and row[col] != ""
-            can_write_including_blanks = overwrite == "yes_incl_blanks" and col in row
+            can_write_value = overwrite == "yes" and source_col in row and pd.notna(row[source_col]) and row[source_col] != ""
+            can_write_including_blanks = overwrite == "yes_incl_blanks" and source_col in row
             if not (can_write_value or can_write_including_blanks):
                 continue
 
-            value = row[col]
+            value = row[source_col]
             md.loc[idx, col] = str(value) if isinstance(value, dict) else value
 
     return md

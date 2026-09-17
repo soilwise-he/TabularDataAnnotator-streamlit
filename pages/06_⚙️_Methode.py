@@ -15,8 +15,8 @@ add_clear_cache_button(key_prefix="methods_page")
 meta_key = "metadata_df"
 if isinstance(st.session_state.get(meta_key), dict):
 	st.session_state[meta_key] = normalize_metadata_columns(st.session_state[meta_key])
-#_EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "ssn:Property"}
-_INCLUDE_ELEMENTS = {"sosa:observedProperty"}
+#_EXCLUDED_ELEMENTS = {"sosa:FeatureOfInterest", "schema:Property"}
+_INCLUDE_ELEMENTS = {"sosa:Property"}
 
 
 ISO_PATTERN = re.compile(r"\bISO\s*[A-Z]*\s*\d+(?:-\d+)?(?::\d{4})?\b", re.IGNORECASE)
@@ -83,6 +83,11 @@ def _first_non_empty(*values) -> str:
 		if text:
 			return text
 	return ""
+
+
+def _series_to_stripped_text(series: pd.Series) -> pd.Series:
+	"""Return a string-normalized, stripped Series without relying on .str accessor."""
+	return series.map(lambda value: _to_text(value).strip())
 
 
 def _extract_first_doi(text: str) -> str:
@@ -280,8 +285,10 @@ if meta_key not in st.session_state or st.session_state.get(meta_key) is None:
 	st.info("No metadata found. Complete step 1 first.")
 	st.stop()
 
+
 if "AI_var_Methode" not in st.session_state or not st.session_state["AI_var_Methode"]:
 	st.info("No AI augmented method output found yet. This can help you process this step, if you still want to get some help based on context documents you already have go to page '✒️ Context' and provide some context documents.")
+	method_tables = {}
 	# st.stop()
 else:
 	method_tables = st.session_state["AI_var_Methode"]
@@ -298,10 +305,10 @@ for tab, table_key in zip(tabs, tab_labels):
 		table_meta_df = st.session_state[meta_key].get(table_key, pd.DataFrame())
 		ordered_meta_names = table_meta_df["name"].tolist() if "name" in table_meta_df.columns else []
 		excluded_names: set[str] = set()
-		if not table_meta_df.empty and {"name", "concept"}.issubset(table_meta_df.columns):
-			element_values = table_meta_df["concept"].astype(str).str.strip()
+		if not table_meta_df.empty and {"name", "concept_type"}.issubset(table_meta_df.columns):
+			element_values = table_meta_df["concept_type"].astype(str).str.strip()
 			excluded_names = set(
-				table_meta_df.loc[~element_values.isin(_INCLUDE_ELEMENTS), "name"].map(_to_text).str.strip()
+				_series_to_stripped_text(table_meta_df.loc[~element_values.isin(_INCLUDE_ELEMENTS), "name"])
 			)
 
 		# First fill the table with augmentations from LLM extraction and Ansis vocab matching
@@ -315,8 +322,8 @@ for tab, table_key in zip(tabs, tab_labels):
 				if {"query", "uri"}.issubset(df_selection_keywords_Ansis.columns):
 					query_uri_mapping_Ansis_TableKey = (
 						df_selection_keywords_Ansis.assign(
-							query=df_selection_keywords_Ansis["query"].map(_to_text).str.strip(),
-							uri=df_selection_keywords_Ansis["uri"].map(_to_text).str.strip(),
+							query=_series_to_stripped_text(df_selection_keywords_Ansis["query"]),
+							uri=_series_to_stripped_text(df_selection_keywords_Ansis["uri"]),
 						)
 						.query("query != '' and uri != ''")
 						.loc[lambda d: ~d["query"].isin(excluded_names)]
@@ -336,6 +343,7 @@ for tab, table_key in zip(tabs, tab_labels):
 			if method_tables:
 				## Ensure header column is named "name" for better matching with metadata_df
 				AI_guess_methode_df = method_tables.get(table_key, pd.DataFrame())
+
 				meta_names = [
 					name
 					for name in st.session_state[meta_key][table_key]["name"].tolist()
@@ -410,7 +418,7 @@ for tab, table_key in zip(tabs, tab_labels):
 		#BUG: can't handle empty dataframe with empty rows?
 		if "name" in current_df.columns:
 			current_df = current_df[
-				~current_df["name"].map(_to_text).str.strip().isin(excluded_names)
+				~_series_to_stripped_text(current_df["name"]).isin(excluded_names)
 			].reset_index(drop=True)
 
 		edited_rows = []
@@ -472,10 +480,19 @@ for tab, table_key in zip(tabs, tab_labels):
 				)
 
 
+			original_reference = _to_text(reference).strip()
+			if selected_method_col:
+				method_value = f"#[{selected_method_col}]"
+			elif kind in {"URL", "DOI"}:
+				method_value = original_reference
+			else:
+				method_value = extracted_reference
+
 			edited_rows.append({
 				"name": row["name"],
 				"reference": extracted_reference,
-				"method": f"#[{selected_method_col}]" if selected_method_col else extracted_reference,
+				"method": method_value,
+				"method_uri": extracted_reference if (not selected_method_col and kind in {"URL", "DOI"}) else "",
 				"kind": kind,
 				"method_column": selected_method_col,
 			})
@@ -499,15 +516,15 @@ for _tbl_key, _review_df in st.session_state["method_review_tables"].items():
 	if "method_column" not in _review_df.columns:
 		continue
 	_meta_df = st.session_state[meta_key].get(_tbl_key)
-	if _meta_df is None or "concept" not in _meta_df.columns:
+	if _meta_df is None or "concept_type" not in _meta_df.columns:
 		continue
 	for _, _rev_row in _review_df.iterrows():
 		_method_col_val = _to_text(_rev_row.get("method_column", "")).strip()
 		if not _method_col_val:
 			continue
-		_mask = _meta_df["name"].map(_to_text).str.strip() == _method_col_val
+		_mask = _series_to_stripped_text(_meta_df["name"]) == _method_col_val
 		if _mask.any():
-			_meta_df.loc[_mask, "concept"] = "sosa:Procedure"
+			_meta_df.loc[_mask, "concept_type"] = "sosa:Procedure"
 	st.session_state[meta_key][_tbl_key] = _meta_df
 
 

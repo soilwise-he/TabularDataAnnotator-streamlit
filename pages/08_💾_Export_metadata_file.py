@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import yaml
 
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
-from util.metadata import normalize_metadata_columns
+from util.metadata import build_metadata_export_filename, normalize_metadata_columns, safe_filename_component
 
 from csvwlib import CSVWConverter
 
@@ -71,11 +71,7 @@ def download_bytes(content: bytes, filename: str, mime: str = 'application/octet
 
 
 def _safe_filename_component(value: str, fallback: str = "export") -> str:
-    text = str(value) if value is not None else ""
-    # Windows-invalid filename chars: <>:"/\\|?* plus control chars.
-    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
-    text = text.strip().strip(".")
-    return text or fallback
+    return safe_filename_component(value, fallback=fallback)
 
 
 
@@ -86,11 +82,12 @@ def _csvw_column_from_row(row):
         col['titles'] = row['element']
 
 
-    if row.get('concept'):
-        col['type'] = row.get('concept')
+    if row.get('concept_type'):
+        col['type'] = row.get('concept_type')
 
-        if row.get('element uri'):
-            col[row.get('concept')] = row.get('element uri')
+        concept_uri_value = row.get('concept_uri') or row.get('element_uri')
+        if concept_uri_value:
+            col[row.get('concept_type')] = concept_uri_value
 
     if row.get('unit'):
         col['schema:unitCode'] = row['unit']
@@ -107,12 +104,12 @@ def _csvw_column_from_row(row):
     
     if row.get('method') and not row['method']=="null":
         col['sosa:usedProcedure'] = row['method']
-    if row.get('resulttype'):
-        if row['resulttype']  in ['date', 'dateTime', 'time']:
-            date_format = row.get('resultformat')
-            col['datatype'] = {"base": row['resulttype'], "format": date_format} if date_format else row['resulttype']
+    if row.get('column_type'):
+        if row['column_type']  in ['date', 'dateTime', 'time']:
+            date_format = row.get('column_format')
+            col['datatype'] = {"base": row['column_type'], "format": date_format} if date_format else row['column_type']
         else:
-            col['datatype'] = row['resulttype']
+            col['datatype'] = row['column_type']
     if row.get('description'):
         col['dc:description'] = row['description']
 
@@ -120,11 +117,11 @@ def _csvw_column_from_row(row):
 
 
 def _build_csvw_table(table_df, url, foreign_keys=None):
-    pk_rows = table_df[table_df.get("primary key", pd.Series(False, index=table_df.index)).astype(bool)]
+    pk_rows = table_df[table_df.get("primary_key", pd.Series(False, index=table_df.index)).astype(bool)]
     pk = pk_rows["name"].iloc[0] if not pk_rows.empty else None
 
     foi_rows = table_df[
-        table_df.get("concept", pd.Series("", index=table_df.index)).astype(str).str.strip()
+        table_df.get("concept_type", pd.Series("", index=table_df.index)).astype(str).str.strip()
         == "sosa:FeatureOfInterest"
     ]
     foi_column_name = foi_rows["name"].iloc[0] if not foi_rows.empty else None
@@ -166,7 +163,7 @@ def _build_foreign_keys(table_key: str, relationships_summary_df: pd.DataFrame, 
     # Filter relationships where this table is the left table (the referencing table)
     relevant_rels = relationships_summary_df[
         (relationships_summary_df["left_table"] == table_key) & 
-        (relationships_summary_df["relation"] != "not linked") &
+        (relationships_summary_df["relation"] != "not-linked") &
         (relationships_summary_df["left_id"].notna()) &
         (relationships_summary_df["left_id"] != "") &
         (relationships_summary_df["right_id"].notna()) &
@@ -221,7 +218,7 @@ def _normalize_table_key(value: str) -> str:
 
 def _looks_like_metadata_df(df: pd.DataFrame) -> bool:
     metadata_columns = {
-        "name", "resulttype", "description", "unit_symbol","unit_uri", "method", "concept", "element", "element uri", "resultformat", "quantity kind_uri"
+        "name", "column_type", "description", "unit_symbol","unit_uri", "method", "method_uri", "concept_type", "concept", "concept_uri", "column_format", "quantity_kind_uri"
     }
     cols = {str(c).strip().lower() for c in df.columns}
     return "name" in cols and (len(cols & metadata_columns) >= 3)
@@ -526,6 +523,7 @@ _SOSA_CONTEXT = [
     },
 ]
 
+#TODO: check relevance
 _SPATIAL_ROLE_TO_PROPERTY = {
     "X": "geo:long",
     "Y": "geo:lat",
@@ -571,7 +569,7 @@ def _sosa_virtual_cluster(
     vc.append({"virtual": True, "propertyUrl": "sosa:hasFeatureOfInterest",
                "aboutUrl": obs_node, "valueUrl": foi_node})
     if concept_uri:
-        vc.append({"virtual": True, "propertyUrl": "sosa:observedProperty",
+        vc.append({"virtual": True, "propertyUrl": "sosa:Property",
                    "aboutUrl": obs_node, "valueUrl": concept_uri})
     if method_uri:
         vc.append({"virtual": True, "propertyUrl": "sosa:usedProcedure",
@@ -654,8 +652,8 @@ def _build_csvw_sosa_table(
         c: dict = {"name": col, "propertyUrl": "dcterms:identifier"}
         if row.get("element"):
             c["titles"] = str(row["element"])
-        if row.get("resulttype"):
-            c["datatype"] = str(row["resulttype"])
+        if row.get("column_type"):
+            c["datatype"] = str(row["column_type"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -672,8 +670,8 @@ def _build_csvw_sosa_table(
         }
         if row.get("element"):
             c["titles"] = str(row["element"])
-        if row.get("resulttype"):
-            c["datatype"] = str(row["resulttype"])
+        if row.get("column_type"):
+            c["datatype"] = str(row["column_type"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -713,8 +711,8 @@ def _build_csvw_sosa_table(
         if isinstance(role, dict):
             role = next(iter(role.values()), "sosa:phenomenonTime")
         row = meta_by_name.get(col, {})
-        dt  = str(row.get("resulttype") or "dateTime")
-        fmt = str(row.get("resultformat") or "")
+        dt  = str(row.get("column_type") or "dateTime")
+        fmt = str(row.get("column_format") or "")
         dt_val = {"base": dt, "format": fmt} if dt in ("date", "dateTime", "time") and fmt else dt
 
         if role == "sosa:resultTime":
@@ -732,13 +730,13 @@ def _build_csvw_sosa_table(
     for col in attr_cols:
         row = meta_by_name.get(col, {})
         c   = {"name": col}
-        prop = str(row.get("element uri") or row.get("concept") or "").strip()
+        prop = str(row.get("concept_uri") or row.get("element_uri") or row.get("concept") or "").strip()
         if prop:
             c["propertyUrl"] = prop
         if row.get("element"):
             c["titles"] = str(row["element"])
-        if row.get("resulttype"):
-            c["datatype"] = str(row["resulttype"])
+        if row.get("column_type"):
+            c["datatype"] = str(row["column_type"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -761,7 +759,7 @@ def _build_csvw_sosa_table(
             "name": obs_col,
             "aboutUrl": qv_about,
             "propertyUrl": "qudt:value",
-            "datatype": str(row.get("resulttype") or "number"),
+            "datatype": str(row.get("column_type") or "number"),
         }
         if row.get("element"):
             c["titles"] = str(row["element"])
@@ -771,8 +769,8 @@ def _build_csvw_sosa_table(
 
         # Derive annotation URIs
         unit_uri    = str(row.get("unit_uri") or row.get("unit") or "").strip() or None
-        concept_uri = str(row.get("element uri") or "").strip() or None
-        method_uri  = str(row.get("method") or "").strip()
+        concept_uri = str(row.get("concept_uri") or row.get("element_uri") or "").strip() or None
+        method_uri  = str(row.get("method_uri") or "").strip()
         if method_uri in ("", "null", "None"):
             method_uri = None
 
@@ -804,8 +802,8 @@ def _build_csvw_sosa_table(
     # ------------------------------------------------------------------ #
     for tc in result_time_cols:
         row = meta_by_name.get(tc, {})
-        dt  = str(row.get("resulttype") or "dateTime")
-        fmt = str(row.get("resultformat") or "")
+        dt  = str(row.get("column_type") or "dateTime")
+        fmt = str(row.get("column_format") or "")
         dt_val = {"base": dt, "format": fmt} if dt in ("date", "dateTime", "time") and fmt else dt
 
         if len(obs_cols) == 1 and foi_col:
@@ -825,8 +823,8 @@ def _build_csvw_sosa_table(
     for col in unsorted_cols:
         row = meta_by_name.get(col, {})
         c   = {"name": col}
-        if row.get("resulttype"):
-            c["datatype"] = str(row["resulttype"])
+        if row.get("column_type"):
+            c["datatype"] = str(row["column_type"])
         if row.get("description"):
             c["dc:description"] = str(row["description"])
         real_cols.append(c)
@@ -835,7 +833,11 @@ def _build_csvw_sosa_table(
     # 8. Optional: rdf:type virtual column for FOI node
     # ------------------------------------------------------------------ #
     if foi_col:
-        foi_type = str(meta_by_name.get(foi_col, {}).get("element uri") or "").strip()
+        foi_type = str(
+            meta_by_name.get(foi_col, {}).get("concept_uri")
+            or meta_by_name.get(foi_col, {}).get("element_uri")
+            or ""
+        ).strip()
         if foi_type:
             virtual_cols.insert(0, {
                 "virtual": True,
@@ -990,10 +992,10 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
     attributes = []
     for _, row in metadata_df.iterrows():
         attr: dict = {"name": str(row.get("name", ""))}
-        concept = str(row.get("element") or row.get("name", "")).strip()
+        concept = str(row.get("concept") or row.get("name", "")).strip()
         description = str(row.get("description") or "").strip()
-        usedProcedure = str(row.get("method") or "").strip()
-        inforamationRole = str(row.get("concept") or "").strip()
+        usedProcedure = str(row.get("method_uri") or row.get("methode_uri") or row.get("method") or "").strip()
+        inforamationRole = str(row.get("concept_type") or "").strip()
 
         if inforamationRole:
             attr["informationRole"] = inforamationRole
@@ -1003,7 +1005,7 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
             attr["abstract"] = {"en": description}
         if usedProcedure:
             attr["usedProcedure"] = usedProcedure
-        raw_type = str(row.get("resulttype") or "").lower().strip()
+        raw_type = str(row.get("column_type") or "").lower().strip()
 
         # TODO: does this realy needs to be mapped?
         if raw_type:
@@ -1011,7 +1013,7 @@ def _build_mcf_dict(table_key: str, metadata_df: pd.DataFrame) -> dict:
         unit = str(row.get("unit_uri") or row.get("unit") or "").strip()
         if unit:
             attr["units"] = unit
-        unit_uri = str(row.get("element uri") or "").strip()
+        unit_uri = str(row.get("concept_uri") or row.get("element_uri") or "").strip()
         if unit_uri:
             attr["url"] = unit_uri
         attributes.append(attr)
@@ -1116,7 +1118,7 @@ def _build_table_link_erd_dot(metadata_by_table: dict, relationships_summary_df:
 
         for _, row in relationships_summary_df.iterrows():
             relation = str(row.get("relation", "")).strip()
-            if relation == "not linked":
+            if relation == "not-linked":
                 continue
 
             left_table = row.get("left_table")
@@ -1150,7 +1152,7 @@ def _build_table_link_erd_dot(metadata_by_table: dict, relationships_summary_df:
     if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
         for _, row in relationships_summary_df.iterrows():
             relation = str(row.get("relation", "")).strip()
-            if relation == "not linked":
+            if relation == "not-linked":
                 continue
 
             left_table = row.get("left_table")
@@ -1241,12 +1243,18 @@ def _is_meaningful_fit_value(value) -> bool:
 
 
 def _build_fit_for_all_export_rows() -> list[dict]:
-    """Collect fit-for-all temporal and spatial defaults for export as a single CSV."""
+    """Collect fit-for-all temporal and spatial defaults for export as flat CSV rows."""
     rows: list[dict] = []
     column_buckets = st.session_state.get("column_buckets", {})
     temporal_deepdive = st.session_state.get("temporal_deepdive", {})
     temporal_precision = st.session_state.get("temporal_precision", {})
     spatial_deepdive = st.session_state.get("spatial_deepdive", {})
+    temporal_precision_to_format = {
+        "Year": "%Y",
+        "Year-Month": "%Y-%m",
+        "Date": "%Y-%m-%d",
+        "DateTime (minute)": "%Y-%m-%dT%H:%M",
+    }
 
     for table_key in column_buckets:
         temporal_fit_all = temporal_deepdive.get(table_key, {}).get("__fit_for_all__")
@@ -1257,25 +1265,25 @@ def _build_fit_for_all_export_rows() -> list[dict]:
                 rows.append({
                     "table": table_key,
                     "kind": "temporal",
+                    "key": temporal_type,
                     "value": temporal_value,
-                    "type": temporal_type,
-                    "precision": temporal_precision.get(table_key, {}).get("__fit_for_all__", ""),
+                    "format": temporal_precision_to_format.get(
+                        temporal_precision.get(table_key, {}).get("__fit_for_all__", ""),
+                        temporal_precision.get(table_key, {}).get("__fit_for_all__", ""),
+                    ),
                 })
 
         spatial_fit_all = spatial_deepdive.get(table_key, {}).get("__fit_for_all__")
         if isinstance(spatial_fit_all, dict):
-            meaningful_spatial = {
-                spatial_key: spatial_value
-                for spatial_key, spatial_value in spatial_fit_all.items()
-                if _is_meaningful_fit_value(spatial_value)
-            }
-            if meaningful_spatial:
+            for spatial_key, spatial_value in spatial_fit_all.items():
+                if not _is_meaningful_fit_value(spatial_value):
+                    continue
                 rows.append({
                     "table": table_key,
                     "kind": "spatial",
-                    "value": json.dumps(meaningful_spatial, ensure_ascii=False),
-                    "type": "",
-                    "precision": "",
+                    "key": spatial_key,
+                    "value": spatial_value,
+                    "format": "",
                 })
 
     return rows
@@ -1316,7 +1324,7 @@ relationships_summary_df = st.session_state.get("table_relationships_summary_df"
 if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
     with st.expander("### Table Linking Summary ", expanded=False):
         erd_dot = _build_table_link_erd_dot(st.session_state[meta_key], relationships_summary_df)
-        st.graphviz_chart(erd_dot, use_container_width=False)
+        st.graphviz_chart(erd_dot, width='content')
 
 # else:
 #     st.info("No table-linking summary found yet. Configure links on the Linking Tables page to include them here.")
@@ -1334,15 +1342,18 @@ st.caption("Simple comma-separated values format")
 
 csv_payloads = {}
 for table_key, metadata_df in st.session_state[meta_key].items():
-    safe_table_key = _safe_filename_component(table_key, fallback="table")
     csv_buf = io.StringIO()
     metadata_df.copy().to_csv(csv_buf, index=False)
-    csv_payloads[f'{safe_table_key}_metadata.csv'] = csv_buf.getvalue().encode('utf-8')
+    csv_payloads[build_metadata_export_filename(table_key, fallback="table")] = csv_buf.getvalue().encode('utf-8')
 
 fit_for_all_rows = _build_fit_for_all_export_rows()
 if fit_for_all_rows:
     fit_for_all_df = pd.DataFrame(fit_for_all_rows)
     csv_payloads['fit_for_all_temporal_spatial.csv'] = fit_for_all_df.to_csv(index=False).encode('utf-8')
+
+relationships_summary_df = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
+if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
+    csv_payloads['table_linking_summary.csv'] = relationships_summary_df.to_csv(index=False).encode('utf-8')
 
 if len(csv_payloads) > 1:
     column_zip, column_individual = st.columns([2,5])
@@ -1375,16 +1386,20 @@ if st.button("Generate TableSchema JSON", key="tableschema_button"):
     schema = {"fields": [], "primaryKey": None}
     for _, r in metadata_df.iterrows():
         f = {"name": r['name']}
-        if r.get('resulttype'):
-            f['type'] = r['resulttype']
+        if r.get('column_type'):
+            f['type'] = r['column_type']
         if r.get('description'):
             f['description'] = r['description']
         if r.get('unit'):
             f['unit'] = r['unit']
         if r.get('method'):
             f['method'] = r['method']
+        if r.get('method_uri'):
+            f['method_uri'] = r['method_uri']
+        elif r.get('methode_uri'):
+            f['method_uri'] = r['methode_uri']
         if r.get('concept'):
-            f['title'] = r['concept']
+            f['title'] = r['concept_type']
         schema['fields'].append(f)
     
     st.json(schema, expanded=True)

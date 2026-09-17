@@ -80,6 +80,20 @@ def _norm_mime(m: Optional[str]) -> str:
     return m.split(",")[0].strip().lower()
 
 
+def _secret_or_env(secret_group: str, secret_name: str, env_names: list[str]) -> str | None:
+    """Return a secret value or the first matching environment variable fallback."""
+    secret_value = st.secrets.get(secret_group, {}).get(secret_name)
+    if secret_value:
+        return secret_value
+
+    for env_name in env_names:
+        env_value = os.getenv(env_name)
+        if env_value:
+            return env_value
+
+    return None
+
+
 
 def markdown_to_plain(md: str) -> str:
     md = re.sub(r"^#{1,6}\s*", "", md, flags=re.M)         # remove headings
@@ -687,7 +701,7 @@ with st.sidebar.expander("LLM Provider", expanded=True):
 
     LLM_selection_info = {
         "OpenAI": {
-            'key' : st.secrets.get("openai", {}).get("api_key"),
+            'key' : _secret_or_env("openai", "api_key", ["OPENAI_API_KEY"]),
             'callfunction': get_response_OpenAI,
             'help_key_creation': 'https://platform.openai.com/account/api-keys',
         },
@@ -697,12 +711,12 @@ with st.sidebar.expander("LLM Provider", expanded=True):
         #     'help_key_creation': 'https://platform.publicai.co/settings/api-keys',
         # },
         " Anthropic": {
-            'key' : st.secrets.get("Claude", {}).get("api_key"),
+            'key' : _secret_or_env("Claude", "api_key", ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]),
             'callfunction': None,
             'help_key_creation': 'https://platform.claude.com/settings/keys',
         },
         "Test_Random": {
-            'key' : st.secrets.get("test", {}).get("api_key"),
+            'key' : _secret_or_env("test", "api_key", ["TEST_RANDOM_API_KEY"]),
             'callfunction': None,
             'help_key_creation': 'https://example.com',
         },

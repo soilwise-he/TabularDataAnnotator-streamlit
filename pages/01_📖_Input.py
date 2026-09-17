@@ -18,7 +18,12 @@ import requests
 
 import csv
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo, add_clear_cache_button
-from util.metadata import apply_new_metadata_info, normalize_metadata_columns
+from util.metadata import (
+    METADATA_EXPORT_FILENAME_SUFFIX,
+    apply_new_metadata_info,
+    build_filename_match_tokens,
+    normalize_metadata_columns,
+)
 
 import html
 from bs4 import BeautifulSoup
@@ -36,7 +41,8 @@ st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
 
 # !! in UoM procedure, it's hardcoded filtered on "numeric" types
 # https://www.w3.org/TR/tabular-data-primer/?ref=stevenfirth.com#datatypes
-DATA_TYPE_OPTIONS = ['anyURI', 'base64Binary', 'boolean', 'date',
+DATA_TYPE_OPTIONS = ['codelist',
+                     'anyURI', 'base64Binary', 'boolean', 'date',
                      'dateTime', 'dateTimeStamp', 'decimal',
                      'integer', 'long', 'int', 'short', 'byte',
                      'nonNegativeInteger', 'positiveInteger', 'unsignedLong',
@@ -67,6 +73,8 @@ SESSION_RESET_KEYS = [
     "_linked_site_df",
     "_linked_obs_df",
     "_linked_obs_filename",
+    "imported_metadata_by_filename",
+    "imported_metadata_by_filename_remote",
 
 ]
 
@@ -78,6 +86,11 @@ SESSION_RESET_PREFIXES = [
 ]
 
 GITHUB_INGEST_SCHEMA_VERSION = "v2-path-keys"
+
+IGNORED_REMOTE_CSV_FILENAMES = {
+    "table_linking_summary.csv",
+    "fit_for_all_temporal_spatial.csv",
+}
 
 
 def _clear_dependent_session_state_for_new_input():
@@ -262,14 +275,14 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
     than float() — handles E notation, %, ‰) and is_compatible_with_datatype for
     structural checks, then falls back to pandas for date/dateTime distinction.
 
-    Returns one of: 'integer', 'decimal', 'date', 'dateTime', 'time', 'boolean', 'json', 'string'.
+    Returns one of: 'integer', 'float', 'date', 'dateTime', 'time', 'boolean', 'json', 'string'.
     """
     series = s.dropna().astype(str).str.strip()
     if len(series) == 0:
         return "string"
     series = series.head(sample_size)
 
-    counts = {"integer": 0, "decimal": 0, "dateTime": 0, "date": 0, "time": 0, "boolean": 0, "json": 0}
+    counts = {"integer": 0, "float": 0, "dateTime": 0, "date": 0, "time": 0, "boolean": 0, "json": 0}
     total = 0
 
     for val in series:
@@ -286,9 +299,9 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
                 if f == int(f):
                     counts["integer"] += 1
                 else:
-                    counts["decimal"] += 1
+                    counts["float"] += 1
             except (ValueError, OverflowError):
-                counts["decimal"] += 1
+                counts["float"] += 1
             continue
 
         # --- boolean (csvwlib is_compatible_with_datatype) ---
@@ -334,10 +347,10 @@ def detect_csvw_datatype_from_series(s: pd.Series, sample_size: int = 200) -> st
     THRESHOLD = 0.8
     # Order: most specific / least ambiguous first
 
-    for dt in ("integer", "decimal", "boolean", "dateTime", "date", "time", "json"):
+    for dt in ("integer", "float", "boolean", "dateTime", "date", "time", "json"):
         if counts[dt] / total >= THRESHOLD:
-            if dt == "integer" and counts["decimal"] > 0:
-                return "decimal"
+            if dt == "integer" and counts["float"] > 0:
+                return "float"
             return dt
     return "string"
 
@@ -548,15 +561,16 @@ def build_metadata_df_from_df(df_origin: pd.DataFrame) -> pd.DataFrame:
         Date_Time_format = detect_date_format_from_series(df[c]) if dtype in ("date", "dateTime", "time") else ""
         cols.append({
             "name": c,
-            "resulttype": dtype,
-            "resultformat": Date_Time_format,
+            "column_type": dtype,
+            "column_format": Date_Time_format,
+            "concept_type": "",
             "concept": "",
-            "element": "",
-            "element uri": "",
+            "concept_uri": "",
             "unit_symbol": "",
             "unit_uri": "",
-            "quantity kind_uri": "",
+            "quantity_kind_uri": "",
             "method": "",
+            "method_uri": "",
             "description": "",
         })
 
@@ -691,60 +705,128 @@ def read_csvBytes_with_sniffer(raw:bytes) -> pd.DataFrame:
         df.columns = [f"column_{idx + 1}" for idx in range(df.shape[1])]
         return df
 
-#TODO: outdated. Needs update to new metadata structure and merging logic.
-@st.cache_data()
-def import_metadata_from_file(uploaded_file) -> pd.DataFrame:
-    # Accept CSV or JSON (tableschema or csvw)
-    name = uploaded_file.name.lower()
+def _canonicalize_metadata_column_name(column_name: str) -> str:
+    key = str(column_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+    alias_map = {
+        "datatype": "column_type",
+        "data_type": "column_type",
+        "result_type": "column_type",
+        "date_time_format": "column_format",
+        "datetime_format": "column_format",
+        "type": "column_type",
+        "element uri": "concept_uri",
+        "elementuri": "concept_uri",
+        "concepturi": "concept_uri",
+        "unit_symbol": "unit_symbol",
+        "unit_symbol_": "unit_symbol",
+        "unit": "unit_symbol",
+        "unit_uri": "unit_uri",
+        "unituri": "unit_uri",
+        "quantity kind_uri": "quantity_kind_uri",
+        "quantity_kinduri": "quantity_kind_uri",
+        "quantitykind_uri": "quantity_kind_uri",
+        "quantity_kind": "quantity_kind_uri",
+        "quantity_kind uri": "quantity_kind_uri",
+        "methode_uri": "method_uri",
+        "methodeuri": "method_uri",
+    }
+    return alias_map.get(key, key).strip()
 
-    #text = uploaded_file.getvalue().decode("utf-8")
+
+def _is_metadata_export_filename(filename: str) -> bool:
+    return str(filename or "").strip().lower().endswith(METADATA_EXPORT_FILENAME_SUFFIX)
+
+
+def _is_ignored_remote_csv_filename(filename: str) -> bool:
+    return str(filename or "").strip().lower() in IGNORED_REMOTE_CSV_FILENAMES
+
+
+def _parse_metadata_csv_bytes(raw: bytes, source_filename: str, show_errors: bool = True) -> dict[str, pd.DataFrame]:
+    df = read_csvBytes_with_sniffer(raw)
+    if df.empty or "name" not in {str(c).strip().lower() for c in df.columns}:
+        if show_errors:
+            st.error("CSV metadata must contain a 'name' column matching column names in the data.")
+        return {}
+
+    normalized = df.copy()
+    normalized.columns = [str(c).strip() for c in normalized.columns]
+    normalized = normalized.rename(columns={c: _canonicalize_metadata_column_name(c) for c in normalized.columns})
+
+    for col in ["column_type", "column_format", "concept_type", "concept", "concept_uri", "unit_symbol", "unit_uri", "quantity_kind_uri", "method", "method_uri", "description"]:
+        if col not in normalized.columns:
+            normalized[col] = ""
+
+    normalized["filename"] = source_filename
+    return {source_filename: normalized}
+
+
+@st.cache_data()
+def import_metadata_from_file(uploaded_file) -> dict[str, pd.DataFrame]:
+    """Parse a single metadata upload and return a dict keyed by filename.
+
+    This is the multi-file-ready shape: each file yields one keyed entry, so later
+    imports can be matched to the correct table using filename-aware logic.
+    """
+    if isinstance(uploaded_file, (list, tuple)):
+        result: dict[str, pd.DataFrame] = {}
+        for uploaded in uploaded_file:
+            parsed = import_metadata_from_file(uploaded)
+            if isinstance(parsed, dict):
+                result.update(parsed)
+        return result
+
+    name = uploaded_file.name.lower()
     raw = uploaded_file.getvalue()
-    
+    source_filename = getattr(uploaded_file, "name", "") or "metadata"
+
     try:
         if name.endswith('.csv'):
-            raw = uploaded_file.getvalue()
-            df = read_csvBytes_with_sniffer(raw)
-            st.write(df.head())
-            # Expect columns: name, element, unit, method, datatype, description
-            if "name" not in df.columns:
-                st.error("CSV metadata must contain a 'name' column matching column names in the data.")
-                return None
-            # Normalize
-            result = df.rename(columns={c: c.lower() for c in df.columns})
-            return result
+            return _parse_metadata_csv_bytes(raw, source_filename=source_filename, show_errors=True)
+
         elif name.endswith('.json'):
-            text = raw.decode("utf-8")
-            j = json.loads(text)
-            # TableSchema style
-            if isinstance(j, dict) and j.get('fields'):
-                rows = []
-                for f in j['fields']:
-                    rows.append({
-                        'name': f.get('name'),
-                        'resulttype': f.get('type') or '',
-                        'description': f.get('description') or '',
-                        'unit': f.get('unit') or '',
-                        'method': f.get('method') or '',
-                        'element': f.get('title') or '',
-                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
-                    })
-                return pd.DataFrame(rows)
-            # CSVW style
-            if isinstance(j, dict) and j.get('tableSchema') and j['tableSchema'].get('columns'):
-                rows = []
-                for f in j['tableSchema']['columns']:
-                    rows.append({
-                        'name': f.get('name'),
-                        'resulttype': f.get('datatype') or f.get('resulttype') or '',
-                        'description': f.get('null') or '',
-                        'unit': f.get('unit') or '',
-                        'method': f.get('method') or '',
-                        'element': (f.get('titles') or [''])[0],
-                        'element uri': f.get('element_uri') or f.get('element uri') or f.get('concept_uri') or ''
-                    })
-                return pd.DataFrame(rows)
-            st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
-            return None
+            # TODO: check for ingestions of these kind of formats
+            st.error('🚧 JSON metadata import not yet implemented.')
+            # text = raw.decode("utf-8")
+            # j = json.loads(text)
+
+            # if isinstance(j, dict) and j.get('fields'):
+            #     rows = []
+            #     for f in j['fields']:
+            #         rows.append({
+            #             'name': f.get('name'),
+            #             'column_type': f.get('type') or '',
+            #             'column_format': '',
+            #             'concept': f.get('concept') or f.get('title') or '',
+            #             'element': f.get('title') or '',
+            #             'element_uri': f.get('element_uri') or f.get('element_uri') or f.get('concept_uri') or '',
+            #             'unit_symbol': f.get('unit_symbol') or f.get('unit') or '',
+            #             'unit_uri': f.get('unit_uri') or f.get('unit uri') or '',
+            #             'quantity_kind_uri': f.get('quantity_kind_uri') or f.get('quantity_kind_uri') or '',
+            #             'method': f.get('method') or '',
+            #             'description': f.get('description') or '',
+            #         })
+            #     return pd.DataFrame(rows)
+
+            # if isinstance(j, dict) and j.get('tableSchema') and j['tableSchema'].get('columns'):
+            #     rows = []
+            #     for f in j['tableSchema']['columns']:
+            #         rows.append({
+            #             'name': f.get('name'),
+            #             'column_type': f.get('datatype') or f.get('column_type') or '',
+            #             'column_format': '',
+            #             'concept': f.get('concept') or '',
+            #             'element': (f.get('titles') or [''])[0] if isinstance(f.get('titles'), list) else (f.get('titles') or ''),
+            #             'element_uri': f.get('element_uri') or f.get('element_uri') or f.get('concept_uri') or '',
+            #             'unit_symbol': f.get('unit_symbol') or f.get('schema:unitCode') or f.get('unit') or '',
+            #             'unit_uri': f.get('unit_uri') or f.get('unit uri') or '',
+            #             'quantity_kind_uri': f.get('quantity_kind_uri') or f.get('quantity_kind_uri') or '',
+            #             'method': f.get('method') or '',
+            #             'description': f.get('dc:description') or f.get('description') or '',
+            #         })
+            #     return pd.DataFrame(rows)
+
+            # st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
+            # return None
         else:
             st.error('Unsupported metadata file type. Upload a CSV or JSON.')
             return None
@@ -970,7 +1052,7 @@ def iter_interesting_zip_members(zf: zipfile.ZipFile, exts: list[str]):
             
 @st.cache_resource
 def process_zip_from_url(file_url: str, tabular_dict: dict, context_files: list, filename_dict: dict,
-                         tabular_exts:list[str], context_exts:list[str]):
+                         tabular_exts:list[str], context_exts:list[str], imported_metadata_by_filename: dict[str, pd.DataFrame] | None = None):
     r = requests.get(file_url)
     r.raise_for_status()
     filename = filename_from_url(file_url)
@@ -984,6 +1066,13 @@ def process_zip_from_url(file_url: str, tabular_dict: dict, context_files: list,
 
             # Reuse your existing readers:
             if member_basename.lower().endswith(".csv"):
+                if _is_ignored_remote_csv_filename(member_basename):
+                    continue
+                if _is_metadata_export_filename(member_basename):
+                    parsed_metadata = _parse_metadata_csv_bytes(raw, source_filename=member_basename, show_errors=False)
+                    if parsed_metadata and imported_metadata_by_filename is not None:
+                        imported_metadata_by_filename.update(parsed_metadata)
+                    continue
                 df = read_csvBytes_with_sniffer(raw)
                 tabular_dict[f"{member_basename} (from {filename})"] = df
                 filename_dict[f"{member_basename} (from {filename})"] = file_url
@@ -1004,7 +1093,7 @@ def process_zip_from_url(file_url: str, tabular_dict: dict, context_files: list,
                 "bytes": raw,
             })
             
-# pick primary key candidate from rows (list of dicts)
+# pick primary_key candidate from rows (list of dicts)
 def pick_primary_key(headers: List[str], rows_sample: List[Dict[str,Any]]) -> Optional[str]:
     # compute unique ratio per header
     scores = []
@@ -1082,6 +1171,7 @@ col1, col2 = st.columns([1, 1])
 tabular_dict = dict()
 zipped_context_files = []
 filename_dict = dict()  # to keep track of original filenames for tabular data
+remote_imported_metadata_by_filename: dict[str, pd.DataFrame] = {}
 upload_tokens: list[str] = []
 url_input = ""
 _filename = None
@@ -1179,6 +1269,7 @@ elif "tabular_data_dict" in st.session_state:
     tabular_dict = {k: df.copy() for k, df in st.session_state["tabular_data_dict"].items()}
     filename_dict = dict(st.session_state.get("filename_dict", {}))
     zipped_context_files = list(st.session_state.get("remote_context_files_from_zip", []))
+    remote_imported_metadata_by_filename = dict(st.session_state.get("imported_metadata_by_filename_remote", {}))
     if mode == 'linked':
         site_df = st.session_state.get("_linked_site_df")
         obs_df = st.session_state.get("_linked_obs_df")
@@ -1187,6 +1278,7 @@ elif "tabular_data_dict" in st.session_state:
 
 # ---------- Phase 3: file I/O — only runs when input actually changed ----------
 if _need_processing:
+    remote_imported_metadata_by_filename = {}
     if mode == 'single CSV':
         if _uploaded:
             try:
@@ -1246,6 +1338,7 @@ if _need_processing:
             st.session_state['remote_context_files_url'] = list(cached_zenodo["files_url_context"])
             st.session_state['remote_context_metadata'] = dict(cached_zenodo["metadata_context"])
             zipped_context_files.extend(list(cached_zenodo["zipped_context_files"]))
+            remote_imported_metadata_by_filename = dict(cached_zenodo.get("imported_metadata_by_filename_remote", {}))
         else:
             filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
             files_url_tabular = get_files_URL_from_Zenodo_id(_record_id, extensions=filtered_extensions_tabular)
@@ -1273,9 +1366,20 @@ if _need_processing:
                         tabular_dict[f"{name_file} | {sheet_name}"] = df
                         filename_dict[name_file] = file_url
                 elif ext_file == '.csv':
-                    uploaded_df = read_csvBytes_with_sniffer(file_response.content)
-                    tabular_dict[name_file] = uploaded_df
-                    filename_dict[name_file] = file_url
+                    if _is_ignored_remote_csv_filename(name_file):
+                        continue
+                    if _is_metadata_export_filename(name_file):
+                        parsed_metadata = _parse_metadata_csv_bytes(
+                            file_response.content,
+                            source_filename=name_file,
+                            show_errors=False,
+                        )
+                        if parsed_metadata:
+                            remote_imported_metadata_by_filename.update(parsed_metadata)
+                    else:
+                        uploaded_df = read_csvBytes_with_sniffer(file_response.content)
+                        tabular_dict[name_file] = uploaded_df
+                        filename_dict[name_file] = file_url
             for file_url in files_url_zip:
                 st.write(f"diving into zip; {file_url}")
                 process_zip_from_url(file_url,
@@ -1283,7 +1387,8 @@ if _need_processing:
                                         zipped_context_files,
                                         filename_dict,
                                         tabular_exts=filtered_extensions_tabular,
-                                        context_exts=filtered_extensions_context)
+                                        context_exts=filtered_extensions_context,
+                                        imported_metadata_by_filename=remote_imported_metadata_by_filename)
 
             st.session_state[zenodo_cache_key] = {
                 "tabular_dict": {k: v.copy() for k, v in tabular_dict.items()},
@@ -1291,6 +1396,7 @@ if _need_processing:
                 "zipped_context_files": list(zipped_context_files),
                 "files_url_context": list(st.session_state.get('remote_context_files_url', [])),
                 "metadata_context": dict(st.session_state.get('remote_context_metadata', {})),
+                "imported_metadata_by_filename_remote": dict(remote_imported_metadata_by_filename),
             }
 
     elif mode == 'url - github' and _github_urls:
@@ -1315,6 +1421,7 @@ if _need_processing:
             filename_dict.update(dict(cached_github["filename_dict"]))
             st.session_state['remote_context_files_url'] = list(cached_github["files_url_context"])
             zipped_context_files.extend(list(cached_github["zipped_context_files"]))
+            remote_imported_metadata_by_filename = dict(cached_github.get("imported_metadata_by_filename_remote", {}))
         else:
             filtered_extensions_github = filtered_extensions_tabular + filtered_extensions_zip + filtered_extensions_context
             processed_raw_urls = set()
@@ -1353,17 +1460,29 @@ if _need_processing:
                             tabular_dict[table_key] = df
                             filename_dict[table_key] = raw_url
                     elif ext_file == '.csv':
-                        uploaded_df = read_csvBytes_with_sniffer(file_response.content)
-                        table_key = build_github_table_key(raw_url, source_url=github_input_url)
-                        tabular_dict[table_key] = uploaded_df
-                        filename_dict[table_key] = raw_url
+                        if _is_ignored_remote_csv_filename(name_file):
+                            continue
+                        if _is_metadata_export_filename(name_file):
+                            parsed_metadata = _parse_metadata_csv_bytes(
+                                file_response.content,
+                                source_filename=name_file,
+                                show_errors=False,
+                            )
+                            if parsed_metadata:
+                                remote_imported_metadata_by_filename.update(parsed_metadata)
+                        else:
+                            uploaded_df = read_csvBytes_with_sniffer(file_response.content)
+                            table_key = build_github_table_key(raw_url, source_url=github_input_url)
+                            tabular_dict[table_key] = uploaded_df
+                            filename_dict[table_key] = raw_url
                     elif ext_file in filtered_extensions_zip:
                         process_zip_from_url(raw_url,
                                                 tabular_dict,
                                                 zipped_context_files,
                                                 filename_dict,
                                                 tabular_exts=filtered_extensions_tabular,
-                                                context_exts=filtered_extensions_context)
+                                                context_exts=filtered_extensions_context,
+                                                imported_metadata_by_filename=remote_imported_metadata_by_filename)
                     elif ext_file in filtered_extensions_context:
                         github_context_urls.add(raw_url)
                     else:
@@ -1375,18 +1494,25 @@ if _need_processing:
                 "filename_dict": dict(filename_dict),
                 "zipped_context_files": list(zipped_context_files),
                 "files_url_context": list(st.session_state.get('remote_context_files_url', [])),
+                "imported_metadata_by_filename_remote": dict(remote_imported_metadata_by_filename),
             }
 
     st.session_state["remote_context_files_from_zip"] = zipped_context_files
+    st.session_state["imported_metadata_by_filename_remote"] = remote_imported_metadata_by_filename
 
 
 
 with col2:
     st.markdown("**Import existing metadata**")
     myinfo = st.empty()
-    metadata_file = st.file_uploader("Upload metadata (CSV or JSON TableSchema/CSVW)", type=['csv', 'json'], key='meta_upload')
+    metadata_file = st.file_uploader(
+        "Upload metadata files (CSV or JSON TableSchema/CSVW)",
+        type=['csv', 'json'],
+        accept_multiple_files=True,
+        key='meta_upload',
+    )
     if 'metadata_df' not in st.session_state or metadata_file is None:
-            myinfo.info("The metadata file is optional but should be a tabular data file with at least a **'name'** column that matches the headers of the uploaded data file. Optionally, it can include columns such as **'resulttype'**, **'concept'**, **'unit'**, **'method'**, and **'description'** for additional annotations.")
+            myinfo.info("The metadata files are optional but each file should contain at least a **'name'** column matching the headers of the uploaded data. Optionally, they can include columns such as **'column_type'**, **'concept'**, **'unit'**, **'method'**, and **'description'** for additional annotations.")
 
 # Handle linked mode linking columns
 if mode == 'linked' and site_df is not None and obs_df is not None:
@@ -1415,14 +1541,22 @@ else:
 
 
 with col2:
-    #TODO: change to dict !!!!
-    # If metadata import provided, parse it
-    imported_metadata_df = None
-    if metadata_file is not None:
-        imported_metadata_df = import_metadata_from_file(metadata_file)
-        if imported_metadata_df is not None:
-            st.success("Imported metadata file parsed.")
-
+    imported_metadata_by_filename: dict[str, pd.DataFrame] = {}
+    remote_metadata_files = dict(st.session_state.get("imported_metadata_by_filename_remote", {}))
+    metadata_files = metadata_file if isinstance(metadata_file, list) else ([metadata_file] if metadata_file is not None else [])
+    if metadata_files or remote_metadata_files:
+        imported_metadata_by_filename = dict(remote_metadata_files)
+        for uploaded_meta in metadata_files:
+            imported_meta_dict = import_metadata_from_file(uploaded_meta)
+            if isinstance(imported_meta_dict, dict):
+                imported_metadata_by_filename.update(imported_meta_dict)
+        if imported_metadata_by_filename:
+            st.session_state["imported_metadata_by_filename"] = imported_metadata_by_filename
+            st.success(f"Imported metadata files parsed ({len(imported_metadata_by_filename)} file(s)).")
+        else:
+            st.session_state.pop("imported_metadata_by_filename", None)
+    else:
+        st.session_state.pop("imported_metadata_by_filename", None)
 
 
 # If a dataframe is present (uploaded or merged), show preview and build metadata
@@ -1541,15 +1675,52 @@ if tabular_dict:
             if key not in st.session_state[meta_key]: 
                 st.session_state[meta_key][key] = build_metadata_df_from_df(df)
 
+            imported_metadata_by_filename = st.session_state.get("imported_metadata_by_filename", {})
+            if imported_metadata_by_filename:
+                matched_import_rows = []
+                table_filename = str(st.session_state.get("filename_dict", {}).get(key, key))
+                table_filename_tokens = build_filename_match_tokens(table_filename) | build_filename_match_tokens(key)
+
+                for source_filename, imported_df in imported_metadata_by_filename.items():
+                    if imported_df.empty:
+                        continue
+                    file_tokens = build_filename_match_tokens(source_filename)
+                    filename_values = imported_df.get("filename", pd.Series([""] * len(imported_df)))
+                    matches_filename = filename_values.astype(str).apply(
+                        lambda value: bool(build_filename_match_tokens(value) & (file_tokens | table_filename_tokens))
+                    )
+                    if matches_filename.any():
+                        matched_import_rows.append(imported_df.loc[matches_filename].copy())
+                        continue
+                    if file_tokens & table_filename_tokens or len(imported_metadata_by_filename) == 1:
+                        matched_import_rows.append(imported_df.copy())
+
+                if matched_import_rows:
+                    imported_rows = pd.concat(matched_import_rows, ignore_index=True, sort=False)
+                    imported_rows = imported_rows.drop(columns=["filename"], errors="ignore")
+                    imported_rows = imported_rows.drop_duplicates(subset=["name"], keep="last")
+
+                    imported_match_rows = imported_rows[
+                        imported_rows["name"].astype(str).str.strip().isin(
+                            st.session_state[meta_key][key]["name"].astype(str).str.strip()
+                        )
+                    ].copy()
+                    if not imported_match_rows.empty:
+                        st.session_state[meta_key][key] = apply_new_metadata_info(
+                            {key: imported_match_rows},
+                            {key: st.session_state[meta_key][key]},
+                            overwrite='yes',
+                        )[key]
+
             if key not in st.session_state["primary_keys_guess"]:
                 st.session_state["primary_keys_guess"][key] = pick_primary_key(
                     df.columns.tolist(), df.head(200).to_dict(orient='records')
                 )
             primary_keys_guess = st.session_state["primary_keys_guess"][key]
             pk_c1, pk_c2,_ = st.columns([2, 2, 6])
-            pk_c1.markdown("Select [primary key](https://en.wikipedia.org/wiki/Primary_key) column (if present)")
+            pk_c1.markdown("Select [primary_key](https://en.wikipedia.org/wiki/Primary_key) column (if present)")
             st.session_state["primary_keys"][key]=pk_c2.selectbox(
-                "primary key",
+                "primary_key",
                 label_visibility = "collapsed",
                 options=[''] + df.columns.tolist(),
                 index=0 if primary_keys_guess is None else df.columns.get_loc(primary_keys_guess) + 1,
@@ -1557,14 +1728,14 @@ if tabular_dict:
                 width=200,
             )
             
-            # Add primary key to metadata dataframe
+            # Add primary_key to metadata dataframe
             primary_key_col = st.session_state["primary_keys"][key]
-            if primary_key_col:  # Only if a primary key was selected
-                if "primary key" not in st.session_state[meta_key][key].columns:
-                    st.session_state[meta_key][key]["primary key"] = False
-                st.session_state[meta_key][key]["primary key"] = st.session_state[meta_key][key]['name']== primary_key_col
+            if primary_key_col:  # Only if a primary_key was selected
+                if "primary_key" not in st.session_state[meta_key][key].columns:
+                    st.session_state[meta_key][key]["primary_key"] = False
+                st.session_state[meta_key][key]["primary_key"] = st.session_state[meta_key][key]['name']== primary_key_col
             else:
-                st.session_state[meta_key][key]["primary key"] = False
+                st.session_state[meta_key][key]["primary_key"] = False
 
 
             # Preview the dataframe
@@ -1596,9 +1767,9 @@ if tabular_dict:
                             original_metadata_df,
                             width='stretch',
                             key=f"editor_{key}",
-                            disabled=[col for col in all_columns if col != "resulttype" and col != "resultformat"],
+                            disabled=[col for col in all_columns if col != "column_type" and col != "column_format"],
                             column_config={
-                                "resulttype": st.column_config.SelectboxColumn(
+                                "column_type": st.column_config.SelectboxColumn(
                                     options=DATA_TYPE_OPTIONS,
                                 ),
                             }, 
