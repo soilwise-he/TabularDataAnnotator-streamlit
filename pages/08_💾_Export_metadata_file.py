@@ -19,7 +19,12 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import yaml
 
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
-from util.metadata import build_metadata_export_filename, normalize_metadata_columns, safe_filename_component
+from util.metadata import (
+    build_metadata_export_filename,
+    build_relationship_summary_from_metadata,
+    normalize_metadata_columns,
+    safe_filename_component,
+)
 
 from csvwlib import CSVWConverter
 
@@ -1321,6 +1326,9 @@ for tab, table_key in zip(meta_tabs, st.session_state[meta_key].keys()):
 
 
 relationships_summary_df = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
+if not isinstance(relationships_summary_df, pd.DataFrame) or relationships_summary_df.empty:
+    relationships_summary_df = build_relationship_summary_from_metadata(st.session_state.get(meta_key, {}))
+    st.session_state["table_relationships_summary_df"] = relationships_summary_df.copy()
 if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
     with st.expander("### Table Linking Summary ", expanded=False):
         erd_dot = _build_table_link_erd_dot(st.session_state[meta_key], relationships_summary_df)
@@ -1352,6 +1360,9 @@ if fit_for_all_rows:
     csv_payloads['fit_for_all_temporal_spatial.csv'] = fit_for_all_df.to_csv(index=False).encode('utf-8')
 
 relationships_summary_df = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
+if not isinstance(relationships_summary_df, pd.DataFrame) or relationships_summary_df.empty:
+    relationships_summary_df = build_relationship_summary_from_metadata(st.session_state.get(meta_key, {}))
+    st.session_state["table_relationships_summary_df"] = relationships_summary_df.copy()
 if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
     csv_payloads['table_linking_summary.csv'] = relationships_summary_df.to_csv(index=False).encode('utf-8')
 
@@ -1440,7 +1451,9 @@ if _sosa_mode:
 if st.button("Generate CSVW JSON", key="csvw_button"):
     filename_dict = st.session_state.get("filename_dict", {})
     _rels = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
-    _rels = _rels if not _rels.empty else None
+    if not isinstance(_rels, pd.DataFrame) or _rels.empty:
+        _rels = build_relationship_summary_from_metadata(st.session_state.get(meta_key, {}))
+    _rels = _rels if isinstance(_rels, pd.DataFrame) and not _rels.empty else None
 
     if _sosa_mode:
         csvw_frame   = build_csvw_sosa_frame(

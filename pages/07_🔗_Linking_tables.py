@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from ui.blocks import add_Soilwise_contact_sidebar, add_Soilwise_logo, add_clear_cache_button
-from util.metadata import normalize_metadata_columns
+from util.metadata import normalize_metadata_columns, sync_relationships_to_metadata
 
 
 st.set_page_config(page_title="Tabular Soil Data Annotation", layout="wide")
@@ -246,6 +246,73 @@ def _infer_relation_from_profiles(left_profile: dict, right_profile: dict) -> st
 		return "many-to-one"
 	return "many-to-many"
 
+
+def _relationship_fk_edges(relationship_records: list[dict]) -> list[tuple[str, str]]:
+	"""Return the logical FK direction for active single-target relationships."""
+	edges = []
+	for record in relationship_records:
+		if not isinstance(record, dict):
+			continue
+
+		left_table = _to_text(record.get("left_table")).strip()
+		right_table = _to_text(record.get("right_table")).strip()
+		relation = record.get("relation")
+		if not left_table or not right_table or relation in (None, "not-linked", "many-to-many"):
+			continue
+
+		if relation == "one-to-many":
+			edges.append((right_table, left_table))
+		else:
+			edges.append((left_table, right_table))
+	return list(dict.fromkeys(edges))
+
+
+def _find_relationship_cycles(edges: list[tuple[str, str]]) -> list[list[str]]:
+	"""Find unique table cycles in a directed relationship graph."""
+	adjacency: dict[str, list[str]] = {}
+	for source, target in edges:
+		adjacency.setdefault(source, []).append(target)
+
+	cycles: dict[tuple[str, ...], list[str]] = {}
+	for start in adjacency:
+		def visit(current: str, path: list[str]) -> None:
+			for target in adjacency.get(current, []):
+				if target == start:
+					cycle = path + [start]
+					rotations = [tuple(cycle[index:-1] + cycle[:index]) for index in range(len(cycle) - 1)]
+					cycles.setdefault(min(rotations), cycle)
+				elif target not in path:
+					visit(target, path + [target])
+
+		visit(start, [start])
+	return list(cycles.values())
+
+
+def _find_direct_indirect_path_conflicts(edges: list[tuple[str, str]]) -> list[tuple[str, str, list[str]]]:
+	"""Find direct dependencies that also have an alternative indirect path."""
+	adjacency: dict[str, list[str]] = {}
+	for source, target in edges:
+		adjacency.setdefault(source, []).append(target)
+
+	conflicts = []
+	for source, target in edges:
+		queue = [(source, [source])]
+		visited = {source}
+		while queue:
+			current, path = queue.pop(0)
+			for next_table in adjacency.get(current, []):
+				if current == source and next_table == target:
+					continue
+				if next_table == target:
+					conflicts.append((source, target, path + [target]))
+					queue = []
+					break
+				if next_table not in visited:
+					visited.add(next_table)
+					queue.append((next_table, path + [next_table]))
+	return conflicts
+
+
 def _find_table_relationships(left_table: str, right_table: str, table_columns: dict, data_dict: dict) -> dict:
 	with st.spinner(f"Find relation in tables; {left_table} → {right_table}"):
 		started_at = perf_counter()
@@ -413,7 +480,7 @@ if not any(table_columns.values()):
 table_pairs = list(itertools.combinations(table_keys, 2))
 
 if "table_relationships" not in st.session_state:
-	st.session_state["table_relationships"] = {}
+	st.session_state["table_relationships"] = {}	
 relationship_records = []
 
 for left_table, right_table in table_pairs:
@@ -509,6 +576,18 @@ for left_table, right_table in table_pairs:
 		# 	)
 		if relation != "not-linked" and (not left_id or not right_id):
 			st.warning("This pair has a relation but no left/right id selected.")
+		elif relation != "not-linked":
+			left_profile = _column_profile(data_dict.get(left_table), left_id)
+			right_profile = _column_profile(data_dict.get(right_table), right_id)
+			expected_relation = _infer_relation_from_profiles(left_profile, right_profile)
+			if relation != expected_relation:
+				st.warning(
+					f"**Cardinality warning**: this declaration is **{relation}**, but the selected "
+					f"columns appear to be **{expected_relation}** based on their values. "
+					f"Left id: {left_id} is {'unique' if left_profile['is_unique'] else 'not unique'}; "
+					f"Right id: {right_id} is {'unique' if right_profile['is_unique'] else 'not unique'}.",
+					icon="🚨"
+				)
 
 		relationship_record = {
 			"left_table": left_table,
@@ -540,9 +619,56 @@ summary_df = pd.DataFrame(
 )
 
 st.dataframe(summary_df, width="stretch")
+
+relationship_edges = _relationship_fk_edges(relationship_records)
+relationship_cycles = _find_relationship_cycles(relationship_edges)
+
+
+for cycle in relationship_cycles:
+    st.warning(
+        f'''
+		Circular dependency detected:
+        '''
+		f'''
+
+        {' → '.join(cycle)}.
+		
+		'''
+        f'''Check whether this loop is intentional and whether at least one link can be optional.'''
+    )
+path_conflicts = _find_direct_indirect_path_conflicts(relationship_edges)
+for source, target, indirect_path in path_conflicts:
+	st.warning(
+		f'''
+		Multiple dependency paths detected: 
+		
+		{source} directly references {target}
+
+		'''
+		f'''but it also reaches it through
+		
+		{' → '.join(indirect_path)}.
+		
+		'''
+
+		f'''Confirm that the direct link is intentional and cannot conflict with the indirect meaning.''',
+
+		icon="🚩"
+	)
+
+st.session_state[meta_key] = sync_relationships_to_metadata(st.session_state.get(meta_key, {}), relationship_records)
 if "table_relationships_summary_df" not in st.session_state:
 	st.session_state["table_relationships_summary_df"] = pd.DataFrame()
 st.session_state["table_relationships_summary_df"] = summary_df.copy()
+
+st.markdown("#### Current metadata table")
+
+meta_tabs = st.tabs(list(st.session_state[meta_key].keys()))
+for tab, table_key in zip(meta_tabs, st.session_state[meta_key].keys()):
+	with tab:
+		st.dataframe(st.session_state[meta_key][table_key], width="stretch")
+
+
 
 # -------------------- reach us --------------------
 add_Soilwise_contact_sidebar()
