@@ -1359,13 +1359,6 @@ if fit_for_all_rows:
     fit_for_all_df = pd.DataFrame(fit_for_all_rows)
     csv_payloads['fit_for_all_temporal_spatial.csv'] = fit_for_all_df.to_csv(index=False).encode('utf-8')
 
-relationships_summary_df = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
-if not isinstance(relationships_summary_df, pd.DataFrame) or relationships_summary_df.empty:
-    relationships_summary_df = build_relationship_summary_from_metadata(st.session_state.get(meta_key, {}))
-    st.session_state["table_relationships_summary_df"] = relationships_summary_df.copy()
-if isinstance(relationships_summary_df, pd.DataFrame) and not relationships_summary_df.empty:
-    csv_payloads['table_linking_summary.csv'] = relationships_summary_df.to_csv(index=False).encode('utf-8')
-
 if len(csv_payloads) > 1:
     column_zip, column_individual = st.columns([2,5])
     # Primary action: download all metadata CSV files as a single ZIP archive.
