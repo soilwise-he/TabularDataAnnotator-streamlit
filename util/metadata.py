@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from typing import Dict
@@ -21,6 +22,7 @@ METADATA_COLUMN_ORDER = [
     "name",
     "column_type",
     "column_format",
+    "fk_target",
     "concept_type",
     "concept",
     "concept_uri",
@@ -31,6 +33,7 @@ METADATA_COLUMN_ORDER = [
     "method_uri",
     "description",
 ]
+
 
 
 def safe_filename_component(value: str, fallback: str = "export") -> str:
@@ -107,6 +110,9 @@ def normalize_metadata_columns(metadata_dict: Dict) -> Dict:
             continue
 
         md = table_df.copy()
+        if "fk_target" not in md.columns:
+            md["fk_target"] = ""
+
         has_legacy_columns = any(col in md.columns for col in LEGACY_COLUMN_RENAMES)
         if has_legacy_columns:
             for old_col, new_col in LEGACY_COLUMN_RENAMES.items():
@@ -137,6 +143,186 @@ def normalize_metadata_columns(metadata_dict: Dict) -> Dict:
         normalized[table_key] = md
 
     return normalized
+
+
+def format_fk_target(table_id: str, column_id: str) -> str:
+    """Format a foreign-key pointer as tableID.columnID."""
+    if table_id is None or column_id is None:
+        return ""
+    table_text = str(table_id).strip()
+    column_text = str(column_id).strip()
+    if not table_text or not column_text:
+        return ""
+    return f"{table_text}.{column_text}"
+
+
+def parse_fk_targets(value) -> list[str]:
+    """Split a metadata fk_target field into a list of target pointers."""
+    if value is None or pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except (TypeError, ValueError):
+            return []
+
+    return [text] if text else []
+
+
+def merge_fk_targets(current_value, new_target: str) -> str:
+    """Append a foreign-key pointer without duplicating entries.
+
+    Single values remain a plain pointer string for readability, while multiple values
+    are encoded as a JSON array to keep CSV output safe and unambiguous.
+    """
+    incoming = [*parse_fk_targets(current_value), *parse_fk_targets(new_target)]
+    seen = set()
+    merged = []
+    for item in incoming:
+        normalized = str(item).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+
+    if not merged:
+        return ""
+    if len(merged) == 1:
+        return merged[0]
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def sync_relationships_to_metadata(metadata_dict: Dict, relationship_records: list[dict]) -> Dict:
+    """Persist linking information on the metadata row that owns the local foreign key.
+
+    The referencing table keeps the pointer on the actual FK column row, formatted as
+    `tableID.columnID`. When one column references multiple external columns, values are
+    stored as a JSON array so the metadata stays in the same dataframe without CSV
+    delimiter collisions.
+
+    This is treated as the source of truth for the current page state: a cell is either
+    linked to the current target set or cleared when a relationship is disabled.
+    """
+    if not isinstance(metadata_dict, dict):
+        return metadata_dict
+
+    synced = metadata_dict.copy()
+    desired_targets: dict[str, dict[str, list[str]]] = {}
+    cleared_targets: dict[str, set[str]] = {}
+
+    for record in relationship_records or []:
+        if not isinstance(record, dict):
+            continue
+
+        left_table = str(record.get("left_table") or "").strip()
+        relation = record.get("relation")
+        left_id = str(record.get("left_id") or record.get("last_left_id") or "").strip()
+        right_table = str(record.get("right_table") or "").strip()
+        right_id = str(record.get("right_id") or record.get("last_right_id") or "").strip()
+
+        if not left_table:
+            continue
+
+        if relation == "not-linked":
+            if left_id:
+                cleared_targets.setdefault(left_table, set()).add(left_id)
+            continue
+
+        if not left_id or not right_table or not right_id:
+            continue
+
+        target_value = format_fk_target(right_table, right_id)
+        if not target_value:
+            continue
+
+        desired_targets.setdefault(left_table, {}).setdefault(left_id, []).append(target_value)
+
+    for table_key, table_df in synced.items():
+        if not isinstance(table_df, pd.DataFrame):
+            continue
+
+        if "name" not in table_df.columns:
+            continue
+
+        if "fk_target" not in table_df.columns:
+            table_df = table_df.copy()
+            table_df["fk_target"] = ""
+            synced[table_key] = table_df
+
+        for idx, row in table_df.iterrows():
+            column_name = str(row.get("name") or "").strip()
+            if not column_name:
+                continue
+
+            if column_name in cleared_targets.get(table_key, set()):
+                table_df.at[idx, "fk_target"] = ""
+                continue
+
+            target_values = desired_targets.get(table_key, {}).get(column_name, [])
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for target in target_values:
+                normalized = str(target).strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                deduped.append(normalized)
+
+            if not deduped:
+                continue
+
+            table_df.at[idx, "fk_target"] = (
+                deduped[0]
+                if len(deduped) == 1
+                else json.dumps(deduped, ensure_ascii=False)
+            )
+
+        synced[table_key] = table_df
+
+    return synced
+
+
+def build_relationship_summary_from_metadata(metadata_dict: Dict) -> pd.DataFrame:
+    """Reconstruct the table-linking summary from metadata fk_target pointers.
+
+    This keeps the metadata dataframe as the source of truth while still exposing a
+    tabular relationship summary for older code paths and UI export consumers.
+    """
+    rows = []
+    if not isinstance(metadata_dict, dict):
+        return pd.DataFrame(rows)
+
+    for table_key, table_df in metadata_dict.items():
+        if not isinstance(table_df, pd.DataFrame):
+            continue
+        if "name" not in table_df.columns or "fk_target" not in table_df.columns:
+            continue
+
+        for _, row in table_df.iterrows():
+            column_name = str(row.get("name") or "").strip()
+            if not column_name:
+                continue
+            for target in parse_fk_targets(row.get("fk_target")):
+                if "." not in target:
+                    continue
+                target_table, target_column = target.split(".", 1)
+                rows.append(
+                    {
+                        "left_table": table_key,
+                        "right_table": target_table.strip(),
+                        "relation": "many-to-one",
+                        "left_id": column_name,
+                        "right_id": target_column.strip(),
+                    }
+                )
+
+    return pd.DataFrame(rows)
 
 
 def _merge_metadata_rows(
