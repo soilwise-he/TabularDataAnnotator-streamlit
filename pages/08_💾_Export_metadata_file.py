@@ -1352,7 +1352,8 @@ st.caption("Simple comma-separated values format")
 csv_payloads = {}
 for table_key, metadata_df in st.session_state[meta_key].items():
     csv_buf = io.StringIO()
-    metadata_df.copy().to_csv(csv_buf, index=False)
+    metadata_for_csv = metadata_df.drop(columns=["primary_key"], errors="ignore")
+    metadata_for_csv.to_csv(csv_buf, index=False)
     csv_payloads[build_metadata_export_filename(table_key, fallback="table")] = csv_buf.getvalue().encode('utf-8')
 
 fit_for_all_rows = _build_fit_for_all_export_rows()
