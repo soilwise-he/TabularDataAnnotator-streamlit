@@ -267,6 +267,54 @@ def extracted_reference_methode_from_string(text: str) -> tuple[str, str]:
 	return "", "EMPTY"
 
 
+def _add_missing_manual_method_rows(
+	review_df: pd.DataFrame,
+	metadata_df: pd.DataFrame,
+	excluded_names: set[str],
+) -> pd.DataFrame:
+	"""Ensure each eligible metadata column has an editable method-review row.
+
+	AI output is optional. Existing metadata is used as the initial value so a
+	user can curate methods even when no context documents or AI guesses exist.
+	"""
+	base_columns = ["name", "reference", "kind", "method", "method_uri", "method_column"]
+	if review_df is None or review_df.empty:
+		out = pd.DataFrame(columns=base_columns)
+	else:
+		out = review_df.copy()
+		for column in base_columns:
+			if column not in out.columns:
+				out[column] = ""
+
+	existing_names = set(_series_to_stripped_text(out["name"]))
+	rows_to_add = []
+	for _, metadata_row in metadata_df.iterrows():
+		name = _to_text(metadata_row.get("name", "")).strip()
+		if not name or name in excluded_names or name in existing_names:
+			continue
+
+		initial_reference = _first_non_empty(
+			metadata_row.get("method_uri", ""),
+			metadata_row.get("method", ""),
+		)
+		extracted_reference, kind = extracted_reference_methode_from_string(initial_reference)
+		if kind == "EMPTY" and initial_reference:
+			extracted_reference = initial_reference
+			kind = "STRING"
+		rows_to_add.append({
+			"name": name,
+			"reference": initial_reference,
+			"kind": kind,
+			"method": initial_reference,
+			"method_uri": metadata_row.get("method_uri", ""),
+			"method_column": "",
+		})
+
+	if rows_to_add:
+		out = pd.concat([out, pd.DataFrame(rows_to_add)], ignore_index=True)
+	return out
+
+
 
 # PIN -------------------- UI --------------------
 
@@ -307,9 +355,12 @@ for tab, table_key in zip(tabs, tab_labels):
 		excluded_names: set[str] = set()
 		if not table_meta_df.empty and {"name", "concept_type"}.issubset(table_meta_df.columns):
 			element_values = table_meta_df["concept_type"].astype(str).str.strip()
-			excluded_names = set(
-				_series_to_stripped_text(table_meta_df.loc[~element_values.isin(_INCLUDE_ELEMENTS), "name"])
-			)
+			# Before concept annotation, no column has the sosa:Property label. In
+			# that state retain every column so manual method entry is still possible.
+			if element_values.isin(_INCLUDE_ELEMENTS).any():
+				excluded_names = set(
+					_series_to_stripped_text(table_meta_df.loc[~element_values.isin(_INCLUDE_ELEMENTS), "name"])
+				)
 
 		# First fill the table with augmentations from LLM extraction and Ansis vocab matching
 		if table_key not in st.session_state["method_review_tables"]:
@@ -404,6 +455,18 @@ for tab, table_key in zip(tabs, tab_labels):
 				ordered_meta_names,
 			)
 
+		# AI suggestions supplement the manual review table; they never determine
+		# whether the user can edit a method for a metadata column.
+		st.session_state["method_review_tables"][table_key] = _add_missing_manual_method_rows(
+			st.session_state["method_review_tables"][table_key],
+			table_meta_df,
+			excluded_names,
+		)
+		st.session_state["method_review_tables"][table_key] = _order_by_metadata_names(
+			st.session_state["method_review_tables"][table_key],
+			ordered_meta_names,
+		)
+
 		# Unsorted columns available for use as a method (procedure) column
 		unsorted_cols: list[str] = (
 			st.session_state.get("column_buckets", {})
@@ -415,7 +478,6 @@ for tab, table_key in zip(tabs, tab_labels):
 		current_df = st.session_state["method_review_tables"][table_key].reset_index(drop=True)
 
 		current_df = _order_by_metadata_names(current_df, ordered_meta_names)
-		#BUG: can't handle empty dataframe with empty rows?
 		if "name" in current_df.columns:
 			current_df = current_df[
 				~_series_to_stripped_text(current_df["name"]).isin(excluded_names)
