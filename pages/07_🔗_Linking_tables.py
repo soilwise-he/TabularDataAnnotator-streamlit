@@ -435,13 +435,15 @@ if preview_tables:
 			with tab:
 				st.dataframe(preview_tables[table_name], width="stretch")
 
-	
+
+st.space("small")	
 st.markdown(
 	"""
-Define how tables relate to each other.
+	#### Define how tables relate to each other.
 
-For each pair of tables, choose the relation type and declare the left and right identifier columns used to link them.
-"""
+	
+	For each pair of tables, choose the relation type and declare the left and right identifier columns used to link them.
+	"""
 )
 
 if meta_key not in st.session_state or not isinstance(st.session_state.get(meta_key), dict) or not st.session_state[meta_key]:
@@ -488,16 +490,19 @@ for left_table, right_table in table_pairs:
 	stored_relationship = st.session_state["table_relationships"].get(pair_key, {})
 
 	suggested_link = _find_table_relationships(left_table, right_table, table_columns, data_dict)
-	#st.write(suggested_link["timing"]) # debug speed
+
 	default_relation = stored_relationship.get("relation", suggested_link["relation"])
+
 	# Use last_left_id/last_right_id so the selection survives a round-trip through "not-linked"
 	default_left_id = stored_relationship.get("last_left_id") or stored_relationship.get("left_id") or suggested_link["left_id"]
 	default_right_id = stored_relationship.get("last_right_id") or stored_relationship.get("right_id") or suggested_link["right_id"]
 
 	with st.container(border=True):
 
+		# Header
 		header_left, header_mid, header_right = st.columns([5, 1, 5])
 
+		# Check if either table has no candidate ID columns
 		if not table_columns[left_table] or not table_columns[right_table]:
 			missing = [t for t in (left_table, right_table) if not table_columns[t]]
 			header_left.markdown(f"#### {left_table}")
@@ -510,6 +515,7 @@ for left_table, right_table in table_pairs:
 			)
 			continue
 
+		# Selection relation type
 		relation = st.selectbox(
 			"Relation",
 			options=RELATION_OPTIONS,
@@ -527,7 +533,7 @@ for left_table, right_table in table_pairs:
 		)
 		header_right.markdown(f"#### {right_table}")
 
-
+		# Selection of left/right id columns
 		if relation == "not-linked":
 			left_id = ""
 			right_id = ""
@@ -558,22 +564,15 @@ for left_table, right_table in table_pairs:
 				key=f"right_id_{pair_key}",
 			)
 
+		# Keeping suggested link display outside of the "not-linked" condition so that it can be shown even if the user has selected a different relation type.
 		if relation != "not-linked" and suggested_link["left_id"] and suggested_link["right_id"]:
 			st.caption(
 				f"Suggested link: {suggested_link['left_id']} {RELATION_ARROW.get(suggested_link['relation'], '↔')} {suggested_link['right_id']}"
 				+ (f" based on {suggested_link['reason']}." if suggested_link["reason"] else ".")
 			)
 
-		# #debug speed
-		# if suggested_link.get("timing"):
-		# 	timing = suggested_link["timing"]
-		# 	st.caption(
-		# 		"Timing: "
-		# 		f"profiles {timing['profile_seconds']}s, "
-		# 		f"value sets {timing['value_set_seconds']}s, "
-		# 		f"scoring {timing['scoring_seconds']}s, "
-		# 		f"total {timing['total_seconds']}s"
-		# 	)
+
+		# Cardinality check with possible warning feedback
 		if relation != "not-linked" and (not left_id or not right_id):
 			st.warning("This pair has a relation but no left/right id selected.")
 		elif relation != "not-linked":
