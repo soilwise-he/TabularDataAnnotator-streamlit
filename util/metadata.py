@@ -206,15 +206,15 @@ def sync_relationships_to_metadata(metadata_dict: Dict, relationship_records: li
     stored as a JSON array so the metadata stays in the same dataframe without CSV
     delimiter collisions.
 
-    This is treated as the source of truth for the current page state: a cell is either
-    linked to the current target set or cleared when a relationship is disabled.
+    The current relationship declarations are the source of truth. Existing fk_target
+    values are cleared before the active declarations are written, so changing the
+    selected local column cannot leave an obsolete pointer in metadata.
     """
     if not isinstance(metadata_dict, dict):
         return metadata_dict
 
     synced = metadata_dict.copy()
     desired_targets: dict[str, dict[str, list[str]]] = {}
-    cleared_targets: dict[str, set[str]] = {}
 
     for record in relationship_records or []:
         if not isinstance(record, dict):
@@ -230,8 +230,6 @@ def sync_relationships_to_metadata(metadata_dict: Dict, relationship_records: li
             continue
 
         if relation == "not-linked":
-            if left_id:
-                cleared_targets.setdefault(left_table, set()).add(left_id)
             continue
 
         if not left_id or not right_table or not right_id:
@@ -250,18 +248,15 @@ def sync_relationships_to_metadata(metadata_dict: Dict, relationship_records: li
         if "name" not in table_df.columns:
             continue
 
+        table_df = table_df.copy()
         if "fk_target" not in table_df.columns:
-            table_df = table_df.copy()
             table_df["fk_target"] = ""
-            synced[table_key] = table_df
+        else:
+            table_df["fk_target"] = ""
 
         for idx, row in table_df.iterrows():
             column_name = str(row.get("name") or "").strip()
             if not column_name:
-                continue
-
-            if column_name in cleared_targets.get(table_key, set()):
-                table_df.at[idx, "fk_target"] = ""
                 continue
 
             target_values = desired_targets.get(table_key, {}).get(column_name, [])
