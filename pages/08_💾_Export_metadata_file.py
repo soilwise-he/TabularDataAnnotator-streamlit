@@ -19,6 +19,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import yaml
 
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
+from csvw_profile_api import build_csvw_from_app_metadata
 from util.metadata import (
     build_metadata_export_filename,
     build_relationship_summary_from_metadata,
@@ -1449,12 +1450,15 @@ if st.button("Generate CSVW JSON", key="csvw_button"):
     _rels = _rels if isinstance(_rels, pd.DataFrame) and not _rels.empty else None
 
     if _sosa_mode:
-        csvw_frame   = build_csvw_sosa_frame(
+        csvw_frame = build_csvw_from_app_metadata(
             metadata_by_table=st.session_state[meta_key],
-            fallback_filename=filename,
-            filename_dict=filename_dict,
             base_url=_base_url,
-            relationships_summary_df=_rels,
+            filename_dict=filename_dict,
+            column_buckets=st.session_state.get("column_buckets", {}),
+            temporal_deepdive=st.session_state.get("temporal_deepdive", {}),
+            spatial_types=st.session_state.get("spatial_types", {}),
+            spatial_fit_for_all=st.session_state.get("spatial_fit_for_all", {}),
+            relationships=_rels.to_dict(orient="records") if _rels is not None else [],
         )
         out_filename = "_SoilWise_sosa.json"
     else:
