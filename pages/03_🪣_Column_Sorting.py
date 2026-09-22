@@ -779,6 +779,11 @@ for tab, tbl in zip(_tabs, tab_labels):
                 continue
             for col in bucket_cols:
                 col_to_uri[col] = uri
+
+        # Moving a column back to Unsorted explicitly removes its bucket-derived type.
+        for col in tbl_buckets.get("Unsorted", []):
+            col_to_uri[col] = ""
+
         existing_concepts_type = meta_df["concept_type"].astype(str).str.strip()
         mapped_concepts = meta_df["name"].map(col_to_uri)
         meta_df["concept_type"] = mapped_concepts.fillna(existing_concepts_type)
