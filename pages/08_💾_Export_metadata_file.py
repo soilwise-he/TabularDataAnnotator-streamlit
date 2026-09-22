@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import yaml
 
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
-from csvw_profile_api import build_csvw_from_app_metadata
+from util.csvw_profile_api import build_csvw_from_app_metadata
 from util.metadata import (
     build_metadata_export_filename,
     build_relationship_summary_from_metadata,
@@ -550,7 +550,7 @@ def _sosa_virtual_cluster(
 ) -> list:
     """Return the CSVW virtual-column cluster for one Observed Property column.
 
-    Mirrors the pattern in soil-observation-data-encodings example 3:
+    Mirrors the pattern in soil-observation-data-encodings:
       Observation → hasResult → QuantityValue
                   → hasFeatureOfInterest → FOI
                   → observedProperty → concept
@@ -1424,7 +1424,6 @@ _sosa_mode = st.checkbox(
         "Generates SOSA-aligned virtual columns: each Observed Property column is encoded "
         "as a full `sosa:Observation → qudt:QuantityValue` sub-graph with unit, observed "
         "property URI, and procedure links — matching the soil-observation-data-encodings "
-        "example 3 pattern. Requires bucket assignments from the Column Sorting page."
     ),
 )
 
@@ -1449,14 +1448,13 @@ if st.button("Generate CSVW JSON", key="csvw_button"):
     if not isinstance(_rels, pd.DataFrame) or _rels.empty:
         _rels = build_relationship_summary_from_metadata(st.session_state.get(meta_key, {}))
     _rels = _rels if isinstance(_rels, pd.DataFrame) and not _rels.empty else None
-
     if _sosa_mode:
         csvw_frame = build_csvw_from_app_metadata(
             metadata_by_table=st.session_state[meta_key],
             base_url=_base_url,
             filename_dict=filename_dict,
-            column_buckets=st.session_state.get("column_buckets", {}),
-            temporal_deepdive=st.session_state.get("temporal_deepdive", {}),
+            # Coordinate roles and table-wide spatial defaults are not yet
+            # persisted in the metadata dataframe.
             spatial_types=st.session_state.get("spatial_types", {}),
             spatial_fit_for_all=st.session_state.get("spatial_fit_for_all", {}),
             relationships=_rels.to_dict(orient="records") if _rels is not None else [],
