@@ -2,7 +2,7 @@
 
 The module is dependency-free and can be called directly from Streamlit::
 
-    from csvw_profile_api import build_csvw_document
+    from util.csvw_profile_api import build_csvw_document
     csvw_json = build_csvw_document(payload)
 
 ``create_fastapi_app`` is an optional adapter for a future HTTP deployment;
@@ -44,6 +44,15 @@ ATTRIBUTE_BUCKET = "FOI - Attribute"
 OBSERVATION_BUCKET = "Observed Property"
 TEMPORAL_BUCKET = "Temporal"
 UNSORTED_BUCKET = "Unsorted"
+
+CONCEPT_TYPE_TO_BUCKET = {
+    "sosa:FeatureOfInterest": FOI_BUCKET,
+    "sosa:Property": OBSERVATION_BUCKET,
+    "geo:Feature": SPATIAL_BUCKET,
+    "schema:Property": ATTRIBUTE_BUCKET,
+    "sosa:phenomenonTime": TEMPORAL_BUCKET,
+    "sosa:resultTime": TEMPORAL_BUCKET,
+}
 
 
 @dataclass
@@ -130,6 +139,54 @@ def _metadata_rows(rows: list[dict[str, Any]], table_key: str) -> dict[str, dict
             raise ValueError(f"Table '{table_key}' has duplicate metadata for column '{name}'.")
         indexed[name] = row
     return indexed
+
+
+def _is_true(value: Any) -> bool:
+    """Interpret JSON and CSV boolean values without treating text as truthy."""
+    return value is True or _text(value).lower() in {"true", "1", "yes"}
+
+
+def _effective_buckets(
+    metadata: dict[str, dict[str, Any]],
+    saved_buckets: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Derive CSVW roles from persisted metadata, using UI buckets as a fallback.
+
+    ``concept_type`` is part of the metadata dataframe.  It is therefore authoritative when present.
+    The transient Column Sorting session state is retained only for unannotated
+    columns and for role detail not stored in the dataframe.
+    """
+    buckets = {bucket: [] for bucket in (*CONCEPT_TYPE_TO_BUCKET.values(), UNSORTED_BUCKET)}
+    assigned: set[str] = set()
+
+    for column_name, row in metadata.items():
+        bucket = CONCEPT_TYPE_TO_BUCKET.get(_text(row.get("concept_type")))
+        if bucket:
+            buckets[bucket].append(column_name)
+            assigned.add(column_name)
+
+    # A declared primary key is a useful persisted fallback when FOI semantics
+    # have not yet been annotated. Do not guess if several columns claim it.
+    if not buckets[FOI_BUCKET]:
+        primary_keys = [
+            column_name
+            for column_name, row in metadata.items()
+            if _is_true(row.get("primary_key"))
+        ]
+        if len(primary_keys) == 1:
+            buckets[FOI_BUCKET].append(primary_keys[0])
+            assigned.add(primary_keys[0])
+
+    for bucket, column_names in saved_buckets.items():
+        if not isinstance(column_names, list):
+            continue
+        target = buckets.setdefault(bucket, [])
+        for column_name in column_names:
+            if column_name in metadata and column_name not in assigned and column_name not in target:
+                target.append(column_name)
+                assigned.add(column_name)
+
+    return buckets
 
 
 def _node(base_url: str, foi_column: str | None, suffix: str = "") -> str:
@@ -256,7 +313,7 @@ def _build_table(
     request: CSVWExportRequest,
 ) -> dict[str, Any]:
     metadata = _metadata_rows(rows, table_key)
-    buckets = request.column_buckets.get(table_key, {})
+    buckets = _effective_buckets(metadata, request.column_buckets.get(table_key, {}))
     foi_columns = buckets.get(FOI_BUCKET, [])
     if len(foi_columns) > 1:
         raise ValueError(f"Table '{table_key}' must have at most one '{FOI_BUCKET}' column.")
@@ -318,7 +375,7 @@ def _build_table(
     result_time_columns: list[str] = []
     for column_name in temporal_columns:
         row = row_for(column_name)
-        role = temporal_roles.get(column_name, "sosa:phenomenonTime")
+        role = temporal_roles.get(column_name) or _text(row.get("concept_type")) or "sosa:phenomenonTime"
         if isinstance(role, dict):
             role = next(iter(role.values()), "sosa:phenomenonTime")
         if role == "sosa:resultTime":
@@ -351,11 +408,14 @@ def _build_table(
         row = row_for(column_name)
         if len(observation_columns) == 1:
             about_url = _node(base_url, foi_column, f"/{observation_columns[0]}")
-            property_url = "sosa:resultTime"
         else:
             about_url = _node(base_url, foi_column)
-            property_url = "sosa:phenomenonTime"
-        column = {"name": column_name, "aboutUrl": about_url, "propertyUrl": property_url, "datatype": _datatype(row, "dateTime")}
+        column = {
+            "name": column_name,
+            "aboutUrl": about_url,
+            "propertyUrl": "sosa:resultTime",
+            "datatype": _datatype(row, "dateTime"),
+        }
         _column_description(column, row)
         real_columns.append(column)
 
@@ -376,13 +436,17 @@ def _build_table(
             virtual_columns.insert(0, {"virtual": True, "aboutUrl": _node(base_url, foi_column), "valueUrl": foi_type, "propertyUrl": "rdf:type"})
 
     schema: dict[str, Any] = {"columns": real_columns + virtual_columns}
+    table: dict[str, Any] = {
+        "url": request.filename_dict.get(table_key, f"{table_key}.csv"),
+        "aboutUrl": _node(base_url, foi_column),
+    }
     if foi_column:
-        schema["aboutUrl"] = _node(base_url, foi_column)
         schema["primaryKey"] = foi_column
     foreign_keys = _foreign_keys(table_key, metadata, request.filename_dict, request.relationships)
     if foreign_keys:
         schema["foreignKeys"] = foreign_keys
-    return {"url": request.filename_dict.get(table_key, f"{table_key}.csv"), "tableSchema": schema}
+    table["tableSchema"] = schema
+    return table
 
 
 def build_csvw_document(payload: CSVWExportRequest | dict[str, Any]) -> dict[str, Any]:
