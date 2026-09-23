@@ -1776,13 +1776,10 @@ if tabular_dict:
                         )
 
             if not edited_df.equals(original_metadata_df):
-                    # update the selected items
-                    st.session_state[meta_key] = apply_new_metadata_info(
-                                                    {key: edited_df},
-                                                    st.session_state.get(meta_key),
-                                                    overwrite='yes_incl_blanks'
-                                                    )
-                    st.rerun()
+                # A data-editor change already causes Streamlit to rerun the script.
+                # Triggering another rerun here can repeatedly replay retained editor
+                # state after a different table has been discarded.
+                st.session_state[meta_key][key] = edited_df.copy()
 
     context_tables_added = 0
     if tables_to_context:
