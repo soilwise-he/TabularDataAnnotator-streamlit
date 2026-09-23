@@ -17,6 +17,8 @@ from functools import partial
 from pathlib import Path
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import yaml
+from rdflib import Graph, Literal, Namespace, URIRef
+from rdflib.namespace import XSD
 
 from ui.blocks import add_Soilwise_logo, add_Soilwise_contact_sidebar, add_clear_cache_button
 from util.csvw_profile_api import build_csvw_from_app_metadata
@@ -28,9 +30,12 @@ from util.metadata import (
 )
 
 from csvwlib import CSVWConverter
+from csvwlib.utils.rdf.Namespaces import Namespaces
 
 RDF_ROW_WARNING_THRESHOLD = 50000
 RDF_LIMITED_ROW_COUNT = 1000
+CSVW = Namespace("http://www.w3.org/ns/csvw#")
+DCTERMS = Namespace("http://purl.org/dc/terms/")
 
 add_Soilwise_logo()
 add_Soilwise_contact_sidebar()
@@ -436,8 +441,205 @@ def _generate_rdf_payloads(metadata_by_table: dict, data_by_table: dict) -> tupl
     return rdf_payloads, rdf_errors
 
 
-def _generate_rdf_ttl_sosa(metadata_by_table: dict, data_by_table: dict, base_url: str) -> str:
-    """Like _generate_rdf_ttl_local but uses SOSA virtual-column CSVW for the metadata."""
+def _prepare_csvwlib_rdf_document(
+    csvw_document: dict,
+    local_csv_url: str,
+    source_df: pd.DataFrame,
+) -> dict:
+    """Prepare a shared CSVW document for csvwlib without changing its download form."""
+    document = json.loads(json.dumps(csvw_document))
+    document["url"] = local_csv_url
+    columns = document.get("tableSchema", {}).get("columns", [])
+
+    # csvwlib associates CSV cells with metadata by position rather than by
+    # column name. The semantic exporter groups columns by role, so reorder the
+    # temporary copy to the source header and omit duplicate semantic mappings
+    # (for example, one time column mapped to several observations).
+    real_columns_by_name = {
+        str(column.get("name")): column
+        for column in columns
+        if not column.get("virtual") and column.get("name") is not None
+    }
+    ordered_real_columns = [
+        real_columns_by_name.get(
+            str(column_name),
+            {"name": str(column_name), "datatype": "string"},
+        )
+        for column_name in source_df.columns
+    ]
+    virtual_columns = [column for column in columns if column.get("virtual")]
+    columns[:] = ordered_real_columns + virtual_columns
+
+    template_column_names = {
+        column_name
+        for column in columns
+        for property_name in ("aboutUrl", "propertyUrl", "valueUrl")
+        if isinstance((template := column.get(property_name)), str)
+        for column_name in re.findall(r"\{([^{}]+)\}", template)
+    }
+
+    for column in columns:
+        # csvwlib attempts to cast values even after reporting an incompatible
+        # integer value. Widen only the temporary RDF document when a source
+        # column contains a decimal fraction, preserving the downloadable CSVW.
+        column_name = column.get("name")
+        if (
+            column.get("datatype") in {"integer", "int", "long", "short", "byte"}
+            and column_name in source_df.columns
+        ):
+            numeric_values = pd.to_numeric(source_df[column_name], errors="coerce").dropna()
+            if not numeric_values.empty and numeric_values.mod(1).ne(0).any():
+                column["datatype"] = "decimal"
+
+        # csvwlib concatenates URI-template values directly and therefore
+        # cannot expand a value it already converted to an integer or float.
+        if column_name in template_column_names:
+            column["datatype"] = "string"
+
+    return document
+
+
+def _register_csvwlib_rdf_prefixes():
+    """Add application CSVW prefixes missing from csvwlib's static registry."""
+    original_all = Namespaces.all
+
+    def extended_namespaces():
+        return {
+            **original_all(),
+            "qudt": Namespace("http://qudt.org/1.1/schema/qudt#"),
+            "geo": Namespace("http://www.w3.org/2003/01/geo/wgs84_pos#"),
+        }
+
+    Namespaces.all = staticmethod(extended_namespaces)
+    return original_all
+
+
+def _csvw_prefixes(document: dict) -> dict[str, str]:
+    """Return the compact-IRI prefixes declared by a CSVW document."""
+    prefixes = {
+        "csvw": str(CSVW),
+        "dcterms": str(DCTERMS),
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "sosa": "http://www.w3.org/ns/sosa/",
+        "qudt": "http://qudt.org/1.1/schema/qudt#",
+        "geo": "http://www.w3.org/2003/01/geo/wgs84_pos#",
+        "schema": "https://schema.org/",
+    }
+    for context_item in document.get("@context", []):
+        if isinstance(context_item, dict):
+            prefixes.update({key: value for key, value in context_item.items() if isinstance(value, str)})
+    return prefixes
+
+
+def _template_value(value: object) -> str:
+    """Render a dataframe value for a CSVW URI-template substitution."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _expand_csvw_template(template: str, row: pd.Series) -> str:
+    """Expand CSVW `{column}` placeholders with values from one source row."""
+    return re.sub(
+        r"\{([^{}]+)\}",
+        lambda match: _template_value(row[match.group(1)]) if match.group(1) in row.index else match.group(0),
+        template,
+    )
+
+
+def _csvw_uri(value: object, prefixes: dict[str, str], row: pd.Series) -> URIRef | None:
+    """Expand and resolve an absolute URI or a compact IRI from CSVW metadata."""
+    if not isinstance(value, str) or not value:
+        return None
+    expanded = _expand_csvw_template(value, row)
+    prefix, separator, local_name = expanded.partition(":")
+    if separator and prefix in prefixes:
+        expanded = f"{prefixes[prefix]}{local_name}"
+    if ":" not in expanded:
+        return None
+    return URIRef(expanded)
+
+
+def _csvw_literal(value: object, datatype: object) -> Literal:
+    """Create a minimally typed RDF literal from one CSV data cell."""
+    datatype_name = datatype.get("base") if isinstance(datatype, dict) else datatype
+    if datatype_name in {"integer", "int", "long", "short", "byte"}:
+        try:
+            return Literal(int(value))
+        except (TypeError, ValueError):
+            pass
+    if datatype_name in {"decimal", "double", "float", "number"}:
+        try:
+            return Literal(float(value))
+        except (TypeError, ValueError):
+            pass
+    if datatype_name == "boolean":
+        return Literal(str(value).strip().lower() in {"true", "1", "yes"})
+    xsd_datatype = {
+        "date": XSD.date,
+        "dateTime": XSD.dateTime,
+        "time": XSD.time,
+    }.get(datatype_name)
+    return Literal(str(value), datatype=xsd_datatype) if xsd_datatype else Literal(str(value))
+
+
+def _materialise_csvw_sosa_graph(ttl: str, csvw_document: dict, source_df: pd.DataFrame) -> str:
+    """Apply CSVW column templates exactly, including virtual-column subjects.
+
+    csvwlib retains CSVW row provenance but currently ignores `aboutUrl` for
+    virtual columns. Keep that provenance and rebuild semantic triples directly
+    from the shared CSVW document.
+    """
+    converter_graph = Graph()
+    converter_graph.parse(data=ttl, format="turtle")
+    graph = Graph()
+    for prefix, namespace in converter_graph.namespaces():
+        graph.bind(prefix, namespace)
+    for triple in converter_graph:
+        if str(triple[1]).startswith(str(CSVW)):
+            graph.add(triple)
+
+    prefixes = _csvw_prefixes(csvw_document)
+    for prefix, namespace in prefixes.items():
+        graph.bind(prefix, Namespace(namespace))
+    schema = csvw_document.get("tableSchema", {})
+    table_about_url = csvw_document.get("aboutUrl", "")
+    columns = schema.get("columns", [])
+
+    for _, row in source_df.iterrows():
+        for column in columns:
+            if not isinstance(column, dict):
+                continue
+            property_uri = _csvw_uri(column.get("propertyUrl"), prefixes, row)
+            subject_uri = _csvw_uri(column.get("aboutUrl") or table_about_url, prefixes, row)
+            if property_uri is None or subject_uri is None:
+                continue
+
+            if column.get("virtual"):
+                object_uri = _csvw_uri(column.get("valueUrl"), prefixes, row)
+                object_value = object_uri if object_uri is not None else column.get("default")
+                if object_value is None:
+                    continue
+                rdf_object = object_value if isinstance(object_value, URIRef) else Literal(str(object_value))
+            else:
+                column_name = column.get("name")
+                if column_name not in source_df.columns:
+                    continue
+                cell_value = row[column_name]
+                if pd.isna(cell_value):
+                    continue
+                rdf_object = _csvw_literal(cell_value, column.get("datatype"))
+            graph.add((subject_uri, property_uri, rdf_object))
+
+    return str(graph.serialize(format="turtle"))
+
+
+def _generate_rdf_ttl_sosa(
+    metadata_by_table: dict,
+    data_by_table: dict,
+    csvw_document: dict,
+) -> str:
+    """Convert a shared-exporter CSVW document to RDF using temporary local data."""
     if not metadata_by_table:
         raise ValueError("No metadata available for RDF export.")
 
@@ -445,9 +647,9 @@ def _generate_rdf_ttl_sosa(metadata_by_table: dict, data_by_table: dict, base_ur
         tmp_path = Path(tmpdir)
 
         used_names: set = set()
-        table_entries: list = []
+        local_filename_dict: dict = {}
         missing_data_tables: list = []
-        filename_dict = st.session_state.get("filename_dict", {})
+        source_df: pd.DataFrame | None = None
 
         for table_key, metadata_df in metadata_by_table.items():
             table_df = _resolve_data_table_for_metadata(table_key, metadata_df, data_by_table)
@@ -460,17 +662,26 @@ def _generate_rdf_ttl_sosa(metadata_by_table: dict, data_by_table: dict, base_ur
                 table_df.to_csv(index=False),
                 encoding="utf-8",
             )
-            # Use the SOSA-aware table builder with the local csv_name as URL
-            table_entries.append(
-                _build_csvw_sosa_table(table_key, metadata_df, csv_name, base_url)
-            )
+            local_filename_dict[table_key] = csv_name
+            source_df = table_df
 
         if missing_data_tables:
             raise ValueError(
                 "Missing tabular data for: " + ", ".join(map(str, missing_data_tables))
             )
 
-        csvw_local = {"@context": _SOSA_CONTEXT, "tables": table_entries}
+        if len(local_filename_dict) != 1:
+            raise ValueError("SOSA RDF conversion requires exactly one source table per document.")
+        if source_df is None:
+            raise ValueError("SOSA RDF conversion could not resolve the source table.")
+
+        # Preserve the shared CSVW structure, redirect it to the temporary
+        # local CSV, and expand prefixes unsupported by csvwlib.
+        csvw_local = _prepare_csvwlib_rdf_document(
+            csvw_document,
+            next(iter(local_filename_dict.values())),
+            source_df,
+        )
 
         metadata_name = "csvw-sosa-metadata.json"
         (tmp_path / metadata_name).write_text(
@@ -485,16 +696,23 @@ def _generate_rdf_ttl_sosa(metadata_by_table: dict, data_by_table: dict, base_ur
 
         try:
             metadata_url = f"http://127.0.0.1:{port}/{_url_quote(metadata_name)}"
-            csv_url      = f"http://127.0.0.1:{port}/{_url_quote(table_entries[0]['url'])}"
-            ttl = CSVWConverter.to_rdf(csv_url=csv_url, metadata_url=metadata_url, format="ttl")
-            return ttl.decode("utf-8") if isinstance(ttl, bytes) else str(ttl)
+            csv_url = f"http://127.0.0.1:{port}/{_url_quote(csvw_local['url'])}"
+            original_namespaces = _register_csvwlib_rdf_prefixes()
+            try:
+                ttl = CSVWConverter.to_rdf(csv_url=csv_url, metadata_url=metadata_url, format="ttl")
+            finally:
+                Namespaces.all = original_namespaces
+            ttl_text = ttl.decode("utf-8") if isinstance(ttl, bytes) else str(ttl)
+            return _materialise_csvw_sosa_graph(ttl_text, csvw_document, source_df)
         finally:
             server.shutdown()
             server.server_close()
 
 
 def _generate_rdf_payloads_sosa(
-    metadata_by_table: dict, data_by_table: dict, base_url: str
+    metadata_by_table: dict,
+    data_by_table: dict,
+    csvw_documents_by_table: dict,
 ) -> tuple[dict, list]:
     rdf_payloads: dict = {}
     rdf_errors:   list = []
@@ -507,13 +725,148 @@ def _generate_rdf_payloads_sosa(
             ttl_text = _generate_rdf_ttl_sosa(
                 metadata_by_table=one_table_metadata,
                 data_by_table=data_by_table,
-                base_url=base_url,
+                csvw_document=csvw_documents_by_table[table_key],
             )
             rdf_payloads[f"{safe_table_key}_sosa.ttl"] = ttl_text.encode("utf-8")
         except Exception as e:
             rdf_errors.append(f"{table_key}: {e}")
 
     return rdf_payloads, rdf_errors
+
+
+def _foreign_key_table_key(resource: object, csvw_documents_by_table: dict) -> str | None:
+    """Resolve a CSVW foreign-key resource to its metadata table key."""
+    resource_text = str(resource or "").strip()
+    if not resource_text:
+        return None
+
+    resource_name = Path(resource_text.split("?", 1)[0]).name.lower()
+    for table_key, document in csvw_documents_by_table.items():
+        document_url = str(document.get("url", "")).strip()
+        if resource_text == document_url:
+            return table_key
+        document_name = Path(document_url.split("?", 1)[0]).name.lower()
+        if resource_name and resource_name == document_name:
+            return table_key
+    return None
+
+
+def _foreign_key_value(value: object) -> str | None:
+    """Normalize a scalar key value without changing its lexical identity."""
+    if value is None or pd.isna(value):
+        return None
+    value_text = str(value).strip()
+    return value_text if value_text else None
+
+
+def _csvw_described_resources(graph: Graph) -> dict[int, object]:
+    """Map CSV data-row numbers to the RDF resource described by each row."""
+    described_resources: dict[int, object] = {}
+    for row, _, row_number in graph.triples((None, CSVW.rownum, None)):
+        for _, _, resource in graph.triples((row, CSVW.describes, None)):
+            try:
+                described_resources[int(str(row_number))] = resource
+            except (TypeError, ValueError):
+                continue
+    return described_resources
+
+
+def _add_foreign_key_rdf_links(
+    combined_graph: Graph,
+    table_graphs: dict[str, Graph],
+    data_by_table: dict,
+    csvw_documents_by_table: dict,
+) -> tuple[int, int]:
+    """Add RDF relations for foreign-key values that resolve to an exported row."""
+    added_links = 0
+    unresolved_values = 0
+
+    for source_table, source_document in csvw_documents_by_table.items():
+        source_df = data_by_table.get(source_table)
+        source_graph = table_graphs.get(source_table)
+        foreign_keys = source_document.get("tableSchema", {}).get("foreignKeys", [])
+        if not isinstance(source_df, pd.DataFrame) or source_graph is None or not isinstance(foreign_keys, list):
+            continue
+
+        source_resources = _csvw_described_resources(source_graph)
+        for foreign_key in foreign_keys:
+            if not isinstance(foreign_key, dict):
+                continue
+            local_column = foreign_key.get("columnReference")
+            reference = foreign_key.get("reference", {})
+            if not isinstance(local_column, str) or not isinstance(reference, dict):
+                continue
+            target_column = reference.get("columnReference")
+            target_table = _foreign_key_table_key(reference.get("resource"), csvw_documents_by_table)
+            if not isinstance(target_column, str) or target_table is None:
+                continue
+
+            target_df = data_by_table.get(target_table)
+            target_graph = table_graphs.get(target_table)
+            if (
+                local_column not in source_df.columns
+                or not isinstance(target_df, pd.DataFrame)
+                or target_column not in target_df.columns
+                or target_graph is None
+            ):
+                continue
+
+            target_resources = _csvw_described_resources(target_graph)
+            target_rows_by_value: dict[str, list[int]] = {}
+            for target_row_number, target_value in enumerate(target_df[target_column].tolist(), start=1):
+                value_key = _foreign_key_value(target_value)
+                if value_key is not None:
+                    target_rows_by_value.setdefault(value_key, []).append(target_row_number)
+
+            for source_row_number, source_value in enumerate(source_df[local_column].tolist(), start=1):
+                value_key = _foreign_key_value(source_value)
+                source_resource = source_resources.get(source_row_number)
+                target_row_numbers = target_rows_by_value.get(value_key, []) if value_key else []
+                if source_resource is None or not target_row_numbers:
+                    if value_key is not None:
+                        unresolved_values += 1
+                    continue
+                for target_row_number in target_row_numbers:
+                    target_resource = target_resources.get(target_row_number)
+                    if target_resource is None:
+                        unresolved_values += 1
+                        continue
+                    triple = (source_resource, DCTERMS.relation, target_resource)
+                    if triple not in combined_graph:
+                        combined_graph.add(triple)
+                        added_links += 1
+
+    return added_links, unresolved_values
+
+
+def _build_harmonised_rdf_payload(
+    rdf_payloads: dict,
+    data_by_table: dict,
+    csvw_documents_by_table: dict,
+) -> tuple[bytes, int, int]:
+    """Merge table RDF graphs and expose their foreign keys as RDF links."""
+    combined_graph = Graph()
+    combined_graph.bind("dcterms", DCTERMS)
+    table_graphs: dict[str, Graph] = {}
+
+    for table_key in csvw_documents_by_table:
+        export_filename = f"{_safe_filename_component(table_key, fallback='table')}_sosa.ttl"
+        rdf_bytes = rdf_payloads.get(export_filename)
+        if rdf_bytes is None:
+            continue
+        table_graph = Graph()
+        table_graph.parse(data=rdf_bytes.decode("utf-8"), format="turtle")
+        table_graphs[table_key] = table_graph
+        for triple in table_graph:
+            combined_graph.add(triple)
+
+    added_links, unresolved_values = _add_foreign_key_rdf_links(
+        combined_graph=combined_graph,
+        table_graphs=table_graphs,
+        data_by_table=data_by_table,
+        csvw_documents_by_table=csvw_documents_by_table,
+    )
+    return str(combined_graph.serialize(format="turtle")).encode("utf-8"), added_links, unresolved_values
 
 
 # ==================== SOSA-aware CSVW ====================
@@ -1419,7 +1772,7 @@ st.caption("W3C CSV on the Web format - [Learn more](https://csvw.org/standards.
 
 _sosa_mode = st.checkbox(
     "Enhanced SOSA CSVW export",
-    value=False,
+    value=True,
     help=(
         "Generates SOSA-aligned virtual columns: each Observed Property column is encoded "
         "as a full `sosa:Observation → qudt:QuantityValue` sub-graph with unit, observed "
@@ -1437,8 +1790,9 @@ if _sosa_mode:
         placeholder="https://example.org/dataset/",
         help=(
             "URI prefix for all Observation / FOI / QuantityValue nodes.  \n"
-            "Example: `https://soilwise.example.com/mydata/` produces nodes like  \n"
-            "`https://soilwise.example.com/mydata/{ID}/{column}/QV`"
+            "The source filename is retained in each table's identifier path.  \n"
+            "Example: `https://soilwise.example.com/mydata/` and `file.csv` produce  \n"
+            "`https://soilwise.example.com/mydata/file.csv/{ID}/{column}/QV`"
         ),
     )
 
@@ -1469,8 +1823,19 @@ if st.button("Generate CSVW JSON", key="csvw_button"):
         )
         out_filename = "_SoilWise.json"
 
-    st.json(csvw_frame)
-    download_bytes(json.dumps(csvw_frame, indent=2).encode("utf-8"), out_filename, "application/json")
+    st.session_state["last_csvw_export"] = {
+        "content": csvw_frame,
+        "filename": out_filename,
+    }
+
+last_csvw_export = st.session_state.get("last_csvw_export")
+if isinstance(last_csvw_export, dict):
+    st.json(last_csvw_export["content"])
+    download_bytes(
+        json.dumps(last_csvw_export["content"], indent=2).encode("utf-8"),
+        last_csvw_export["filename"],
+        "application/json",
+    )
 
 st.divider()
 
@@ -1480,7 +1845,7 @@ st.caption("Resource Description Framework format - [Learn more](https://www.w3.
 
 _rdf_sosa_mode = st.checkbox(
     "Enhanced SOSA RDF export",
-    value=False,
+    value=True,
     key="rdf_sosa_mode",
     help=(
         "Generates RDF using the SOSA virtual-column CSVW as input, producing a full "
@@ -1499,7 +1864,8 @@ if _rdf_sosa_mode:
         key="rdf_base_url",
         help=(
             "URI prefix used to construct Observation / FOI / QuantityValue node URIs.  "
-            "Same value as used in the Enhanced SOSA CSVW export above."
+            "Each table's source filename is included after this prefix. Same value as used "
+            "in the Enhanced SOSA CSVW export above."
         ),
     )
 
@@ -1561,11 +1927,51 @@ if run_auto_rdf or run_force_full_rdf:
         )
 
     if _rdf_sosa_mode:
+        rdf_filename_dict = st.session_state.get("filename_dict", {})
+        rdf_relationships = st.session_state.get("table_relationships_summary_df", pd.DataFrame())
+        if not isinstance(rdf_relationships, pd.DataFrame) or rdf_relationships.empty:
+            rdf_relationships = build_relationship_summary_from_metadata(st.session_state[meta_key])
+
+        # Use the same CSVW exporter as the CSVW JSON action. Each document is
+        # made per table because its URL is replaced with a temporary local CSV
+        # immediately before CSVW-to-RDF conversion.
+        rdf_csvw_documents = {
+            table_key: build_csvw_from_app_metadata(
+                metadata_by_table={table_key: metadata_df},
+                base_url=_rdf_base_url,
+                filename_dict=rdf_filename_dict,
+                spatial_types=st.session_state.get("spatial_types", {}),
+                spatial_fit_for_all=st.session_state.get("spatial_fit_for_all", {}),
+                relationships=(
+                    rdf_relationships.to_dict(orient="records")
+                    if isinstance(rdf_relationships, pd.DataFrame)
+                    else []
+                ),
+            )
+            for table_key, metadata_df in st.session_state[meta_key].items()
+        }
+        rdf_csvw_documents # DEBUG
         rdf_payloads, rdf_errors = _generate_rdf_payloads_sosa(
             metadata_by_table=st.session_state[meta_key],
             data_by_table=rdf_input_tables,
-            base_url=_rdf_base_url,
+            csvw_documents_by_table=rdf_csvw_documents,
         )
+        if rdf_payloads:
+            try:
+                harmonised_payload, relation_count, unresolved_count = _build_harmonised_rdf_payload(
+                    rdf_payloads=rdf_payloads,
+                    data_by_table=rdf_input_tables,
+                    csvw_documents_by_table=rdf_csvw_documents,
+                )
+                rdf_payloads["_SoilWise_sosa.ttl"] = harmonised_payload
+                st.caption(f"Harmonised RDF includes {relation_count} foreign-key relation(s).")
+                if unresolved_count:
+                    st.warning(
+                        f"{unresolved_count} foreign-key value(s) could not be linked because no "
+                        "matching exported target row was found."
+                    )
+            except Exception as error:
+                rdf_errors.append(f"harmonised RDF: {error}")
         zip_filename = "metadata_rdf_sosa_exports.zip"
     else:
         rdf_payloads, rdf_errors = _generate_rdf_payloads(
@@ -1573,6 +1979,18 @@ if run_auto_rdf or run_force_full_rdf:
             data_by_table=rdf_input_tables,
         )
         zip_filename = "metadata_rdf_exports.zip"
+
+    st.session_state["last_rdf_export"] = {
+        "payloads": rdf_payloads,
+        "errors": rdf_errors,
+        "zip_filename": zip_filename,
+    }
+
+last_rdf_export = st.session_state.get("last_rdf_export")
+if isinstance(last_rdf_export, dict):
+    rdf_payloads = last_rdf_export["payloads"]
+    rdf_errors = last_rdf_export["errors"]
+    zip_filename = last_rdf_export["zip_filename"]
 
     if rdf_errors:
         st.error(
@@ -1593,9 +2011,12 @@ if run_auto_rdf or run_force_full_rdf:
             download_bytes(zip_buf.getvalue(), zip_filename, 'application/zip')
 
         with column_individual:
-            with st.expander("Download individual RDF files", expanded=False):
+            with st.expander("Preview and download individual RDF files", expanded=False):
                 for export_filename, export_bytes in rdf_payloads.items():
                     download_bytes(export_bytes, export_filename, 'text/turtle')
+                for export_filename, export_bytes in rdf_payloads.items():
+                    st.markdown(f"**{export_filename}**")
+                    st.code(export_bytes.decode("utf-8"), language="turtle")
     else:
         for export_filename, export_bytes in rdf_payloads.items():
             st.code(export_bytes.decode("utf-8"), language="turtle")
