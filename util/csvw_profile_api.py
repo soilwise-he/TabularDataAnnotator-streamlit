@@ -13,9 +13,11 @@ stateless and independent of Streamlit session state.
 from __future__ import annotations
 
 import json
+from pathlib import PurePath
 from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 
 SOSA_CONTEXT = [
@@ -132,7 +134,7 @@ def _metadata_rows(rows: list[dict[str, Any]], table_key: str) -> dict[str, dict
         if not _text(row.get("concept_uri")):
             row["concept_uri"] = row.get("element_uri", "")
 
-        name = _text(row.get("name"))
+        name = _text(row.get("name")) or _text(row.get("titles"))
         if not name:
             raise ValueError(f"Table '{table_key}' has a metadata record without a name.")
         if name in indexed:
@@ -194,6 +196,16 @@ def _node(base_url: str, foi_column: str | None, suffix: str = "") -> str:
     return f"{base_url}{identity}{suffix}"
 
 
+def _resource_identifier_base(request: CSVWExportRequest, table_key: str) -> str:
+    """Return a distinct, filename-aware identifier base for one source table."""
+    fallback_filename = table_key if PurePath(table_key).suffix else f"{table_key}.csv"
+    source_url = _text(request.filename_dict.get(table_key)) or fallback_filename
+    source_path = unquote(urlsplit(source_url).path).replace("\\", "/")
+    filename = PurePath(source_path).name or f"{table_key}.csv"
+    encoded_filename = quote(filename, safe="._-~")
+    return f"{request.base_url.rstrip('/')}/{encoded_filename}/"
+
+
 def _datatype(row: dict[str, Any], fallback: str = "string") -> str | dict[str, str]:
     datatype = _text(row.get("column_type")) or fallback
     date_format = _text(row.get("column_format"))
@@ -203,9 +215,11 @@ def _datatype(row: dict[str, Any], fallback: str = "string") -> str | dict[str, 
 
 
 def _column_description(column: dict[str, Any], row: dict[str, Any]) -> None:
-    title = _text(row.get("element")) or _text(row.get("concept"))
-    if title:
-        column["titles"] = title
+
+    # 22/09/2026: decision to keep the concept label out of the documentation 
+    # title = _text(row.get("element")) or _text(row.get("concept"))
+    # if title:
+    #     column["titles"] = title
     description = _text(row.get("description"))
     if description:
         column["dc:description"] = description
@@ -272,7 +286,6 @@ def _virtual_observation_columns(
     foi_column: str | None,
     base_url: str,
     row: dict[str, Any],
-    result_time_default: str | None,
 ) -> list[dict[str, Any]]:
     observation = _node(base_url, foi_column, f"/{observation_column}")
     quantity_value = f"{observation}/QV"
@@ -288,16 +301,6 @@ def _virtual_observation_columns(
     method_uri = _text(row.get("method_uri"))
     if method_uri:
         columns.append({"virtual": True, "aboutUrl": observation, "valueUrl": method_uri, "propertyUrl": "sosa:usedProcedure"})
-    if result_time_default is not None:
-        time_column: dict[str, Any] = {
-            "virtual": True,
-            "aboutUrl": observation,
-            "propertyUrl": "sosa:resultTime",
-            "datatype": "dateTime",
-        }
-        if result_time_default:
-            time_column["default"] = result_time_default
-        columns.append(time_column)
     unit_uri = _text(row.get("unit_uri"))
     if unit_uri:
         columns.append({"virtual": True, "aboutUrl": quantity_value, "valueUrl": unit_uri, "propertyUrl": "qudt:hasUnit"})
@@ -321,7 +324,7 @@ def _build_table(
     if foi_column and foi_column not in metadata:
         raise ValueError(f"Table '{table_key}' refers to missing FOI column '{foi_column}'.")
 
-    base_url = request.base_url.rstrip("/") + "/"
+    base_url = _resource_identifier_base(request, table_key)
     temporal_roles = request.temporal_deepdive.get(table_key, {})
     spatial_roles = request.spatial_types.get(table_key, {})
     spatial_defaults = request.spatial_fit_for_all.get(table_key, {})
@@ -335,7 +338,7 @@ def _build_table(
 
     for column_name in foi_columns:
         row = row_for(column_name)
-        column = {"name": column_name, "propertyUrl": "dcterms:identifier", "datatype": _datatype(row)}
+        column = {"titles": column_name, "propertyUrl": "dcterms:identifier", "datatype": _datatype(row)}
         _column_description(column, row)
         real_columns.append(column)
 
@@ -350,7 +353,7 @@ def _build_table(
         row = row_for(column_name)
         role = spatial_roles.get(column_name)
         column = {
-            "name": column_name,
+            "titles": column_name,
             "aboutUrl": _node(base_url, foi_column, "/geo"),
             "propertyUrl": SPATIAL_ROLE_TO_PROPERTY.get(role, "geo:location"),
             "datatype": _datatype(row),
@@ -372,23 +375,11 @@ def _build_table(
 
     observation_columns = buckets.get(OBSERVATION_BUCKET, [])
     temporal_columns = buckets.get(TEMPORAL_BUCKET, [])
-    result_time_columns: list[str] = []
-    for column_name in temporal_columns:
-        row = row_for(column_name)
-        role = temporal_roles.get(column_name) or _text(row.get("concept_type")) or "sosa:phenomenonTime"
-        if isinstance(role, dict):
-            role = next(iter(role.values()), "sosa:phenomenonTime")
-        if role == "sosa:resultTime":
-            result_time_columns.append(column_name)
-            continue
-        column = {"name": column_name, "propertyUrl": "sosa:phenomenonTime", "datatype": _datatype(row, "dateTime")}
-        _column_description(column, row)
-        real_columns.append(column)
 
     for column_name in buckets.get(ATTRIBUTE_BUCKET, []):
         row = row_for(column_name)
         property_uri = _text(row.get("concept_uri")) or _text(row.get("concept"))
-        column = {"name": column_name, "datatype": _datatype(row)}
+        column = {"titles": column_name, "datatype": _datatype(row)}
         if property_uri:
             column["propertyUrl"] = property_uri
         _column_description(column, row)
@@ -398,26 +389,34 @@ def _build_table(
         row = row_for(column_name)
         observation = _node(base_url, foi_column, f"/{column_name}")
         quantity_value = f"{observation}/QV"
-        column = {"name": column_name, "aboutUrl": quantity_value, "propertyUrl": "qudt:value", "datatype": _datatype(row, "number")}
+        column = {"titles": column_name, "aboutUrl": quantity_value, "propertyUrl": "qudt:value", "datatype": _datatype(row, "number")}
         _column_description(column, row)
         real_columns.append(column)
-        default_result_time = "" if result_time_columns and len(observation_columns) > 1 else None
-        virtual_columns.extend(_virtual_observation_columns(column_name, foi_column, base_url, row, default_result_time))
+        virtual_columns.extend(_virtual_observation_columns(column_name, foi_column, base_url, row))
 
-    for column_name in result_time_columns:
+    # A timestamp in a row describes every observation generated from that
+    # row. Emit a mapping for each observation so both result and phenomenon
+    # time are attached to the SOSA Observation, never the table-row/FOI node.
+    for column_name in temporal_columns:
         row = row_for(column_name)
-        if len(observation_columns) == 1:
-            about_url = _node(base_url, foi_column, f"/{observation_columns[0]}")
-        else:
-            about_url = _node(base_url, foi_column)
-        column = {
-            "name": column_name,
-            "aboutUrl": about_url,
-            "propertyUrl": "sosa:resultTime",
-            "datatype": _datatype(row, "dateTime"),
-        }
-        _column_description(column, row)
-        real_columns.append(column)
+        role = temporal_roles.get(column_name) or _text(row.get("concept_type")) or "sosa:phenomenonTime"
+        if isinstance(role, dict):
+            role = next(iter(role.values()), "sosa:phenomenonTime")
+        target_observations = observation_columns or [None]
+        for observation_column in target_observations:
+            about_url = (
+                _node(base_url, foi_column, f"/{observation_column}")
+                if observation_column is not None
+                else _node(base_url, foi_column)
+            )
+            column = {
+                "titles": column_name,
+                "aboutUrl": about_url,
+                "propertyUrl": role,
+                "datatype": _datatype(row, "dateTime"),
+            }
+            _column_description(column, row)
+            real_columns.append(column)
 
     assigned = {column for names in buckets.values() for column in names}
     unsorted_columns = [
@@ -426,7 +425,7 @@ def _build_table(
     ]
     for column_name in dict.fromkeys(unsorted_columns):
         row = row_for(column_name)
-        column = {"name": column_name, "datatype": _datatype(row)}
+        column = {"titles": column_name, "datatype": _datatype(row)}
         _column_description(column, row)
         real_columns.append(column)
 
@@ -435,7 +434,14 @@ def _build_table(
         if foi_type:
             virtual_columns.insert(0, {"virtual": True, "aboutUrl": _node(base_url, foi_column), "valueUrl": foi_type, "propertyUrl": "rdf:type"})
 
-    schema: dict[str, Any] = {"columns": real_columns + virtual_columns}
+    columns = real_columns + virtual_columns
+    for index, column in enumerate(columns, start=1):
+        if column.get("virtual"):
+            column.setdefault("name", f"virtual{index}")
+        else:
+            column.setdefault("name", _text(column.get("titles")) or f"column{index}")
+
+    schema: dict[str, Any] = {"columns": columns}
     table: dict[str, Any] = {
         "url": request.filename_dict.get(table_key, f"{table_key}.csv"),
         "aboutUrl": _node(base_url, foi_column),
