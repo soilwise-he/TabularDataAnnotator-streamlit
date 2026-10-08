@@ -3,6 +3,7 @@
 .streamlit/secrets.toml
 
 data/*_cache.json
+Graveyard/*_cache.json
 
 
 # Byte-compiled / optimized / DLL files
@@ -150,6 +151,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.vscode/
 
 # Spyder project settings
 .spyderproject
