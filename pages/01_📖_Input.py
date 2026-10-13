@@ -915,7 +915,6 @@ def _build_metadata_summary_df(metadata_df: pd.DataFrame) -> pd.DataFrame:
         "column_format",
         "codelist_annotation",
         "codelist_details",
-        "primary_key",
         "concept_type",
         "concept",
         "concept_uri",
@@ -925,6 +924,7 @@ def _build_metadata_summary_df(metadata_df: pd.DataFrame) -> pd.DataFrame:
         "method",
         "method_uri",
         "description",
+        "primary_key",
     ]
     available_columns = [column for column in ordered_columns if column in summary_df.columns]
     return summary_df[available_columns].copy()
@@ -1108,6 +1108,160 @@ def _is_ignored_remote_csv_filename(filename: str) -> bool:
     return str(filename or "").strip().lower() in IGNORED_REMOTE_CSV_FILENAMES
 
 
+def _as_csvw_column_refs(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, list):
+        refs: list[str] = []
+        for item in value:
+            refs.extend(_as_csvw_column_refs(item))
+        return refs
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _csvw_table_to_metadata_df(table: dict[str, Any], fallback_name: str) -> pd.DataFrame:
+    if not isinstance(table, dict):
+        return pd.DataFrame()
+
+    schema = table.get("tableSchema") if isinstance(table.get("tableSchema"), dict) else {}
+    columns = schema.get("columns") if isinstance(schema, dict) else []
+    if not isinstance(columns, list):
+        return pd.DataFrame()
+
+    foreign_keys = schema.get("foreignKeys") if isinstance(schema, dict) else []
+    fk_map: dict[str, str] = {}
+    if isinstance(foreign_keys, list):
+        for foreign_key in foreign_keys:
+            if not isinstance(foreign_key, dict):
+                continue
+            reference = foreign_key.get("reference") if isinstance(foreign_key.get("reference"), dict) else {}
+            ref_resource = str(reference.get("resource") or reference.get("table") or "").strip()
+            local_columns = _as_csvw_column_refs(foreign_key.get("columnReference"))
+            ref_columns = _as_csvw_column_refs(reference.get("columnReference"))
+            for index, local_name in enumerate(local_columns):
+                if not local_name:
+                    continue
+                target_column = ref_columns[index] if index < len(ref_columns) else (ref_columns[0] if ref_columns else "")
+                if ref_resource and target_column:
+                    fk_map[local_name] = f"{ref_resource}.{target_column}"
+                elif ref_resource:
+                    fk_map[local_name] = ref_resource
+
+    rows: list[dict[str, str]] = []
+    for column in columns:
+        if not isinstance(column, dict):
+            continue
+        name = str(column.get("name") or "").strip()
+        if not name:
+            continue
+
+        titles = column.get("titles")
+        concept = ""
+        if isinstance(titles, list):
+            for item in titles:
+                if isinstance(item, str) and item.strip():
+                    concept = item.strip()
+                    break
+        elif isinstance(titles, str):
+            concept = titles.strip()
+        elif isinstance(column.get("title"), str):
+            concept = str(column.get("title")).strip()
+
+        row = {
+            "name": name,
+            "column_type": str(column.get("datatype") or column.get("columnType") or "").strip(),
+            "column_format": str(column.get("format") or column.get("dateTimeFormat") or "").strip(),
+            "concept": concept,
+            "concept_uri": str(column.get("propertyUrl") or column.get("aboutUrl") or column.get("valueUrl") or "").strip(),
+            "unit_symbol": str(column.get("unit") or column.get("unitCode") or column.get("unitSymbol") or "").strip(),
+            "unit_uri": str(column.get("unitUrl") or column.get("unit_uri") or "").strip(),
+            "quantity_kind_uri": str(column.get("quantityKind") or column.get("quantityKindUri") or column.get("quantity_kind_uri") or "").strip(),
+            "method": str(column.get("method") or column.get("measurementTechnique") or "").strip(),
+            "method_uri": str(column.get("method_uri") or column.get("methodUrl") or "").strip(),
+            "description": str(column.get("description") or column.get("dc:description") or "").strip(),
+            "fk_target": fk_map.get(name, ""),
+        }
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    for col in ["column_type", "column_format", "concept_type", "concept", "concept_uri", "unit_symbol", "unit_uri", "quantity_kind_uri", "method", "method_uri", "description", "fk_target"]:
+        if col not in df.columns:
+            df[col] = ""
+    return df
+
+
+def _parse_csvw_json_bytes(raw: bytes, source_filename: str) -> dict[str, pd.DataFrame]:
+    try:
+        payload = json.loads(raw.decode("utf-8-sig"))
+    except Exception:
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+
+    tables = payload.get("tables") if isinstance(payload.get("tables"), list) else []
+    if tables:
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            table_key = str(table.get("url") or table.get("dc:title") or source_filename).strip() or source_filename
+            df = _csvw_table_to_metadata_df(table, fallback_name=table_key)
+            if not df.empty:
+                normalized = df.copy()
+                normalized["name"] = normalized["name"].astype(str)
+                result[table_key] = normalize_metadata_columns({table_key: normalized})[table_key]
+        if result:
+            return result
+
+    if isinstance(payload.get("tableSchema"), dict) or isinstance(payload.get("fields"), list):
+        table_key = source_filename
+        schema = payload.get("tableSchema") if isinstance(payload.get("tableSchema"), dict) else {}
+        columns = schema.get("columns") if isinstance(schema, dict) else payload.get("fields")
+        if isinstance(columns, list):
+            rows: list[dict[str, str]] = []
+            for column in columns:
+                if not isinstance(column, dict):
+                    continue
+                name = str(column.get("name") or "").strip()
+                if not name:
+                    continue
+                rows.append({
+                    "name": name,
+                    "column_type": str(column.get("datatype") or column.get("type") or "").strip(),
+                    "column_format": str(column.get("format") or "").strip(),
+                    "concept": str((column.get("titles") or [""])[0] if isinstance(column.get("titles"), list) else (column.get("title") or column.get("titles") or "")).strip(),
+                    "concept_uri": str(column.get("propertyUrl") or column.get("aboutUrl") or "").strip(),
+                    "unit_symbol": str(column.get("unit") or column.get("unitCode") or "").strip(),
+                    "unit_uri": str(column.get("unitUrl") or "").strip(),
+                    "quantity_kind_uri": str(column.get("quantityKind") or column.get("quantityKindUri") or "").strip(),
+                    "method": str(column.get("method") or "").strip(),
+                    "method_uri": str(column.get("method_uri") or "").strip(),
+                    "description": str(column.get("description") or column.get("dc:description") or "").strip(),
+                    "fk_target": "",
+                })
+            if rows:
+                df = pd.DataFrame(rows)
+                result[table_key] = normalize_metadata_columns({table_key: df})[table_key]
+
+    return result
+
+
+def _try_parse_remote_metadata_bytes(raw: bytes, source_filename: str) -> dict[str, pd.DataFrame]:
+    parsed = _parse_csvw_json_bytes(raw, source_filename)
+    if parsed:
+        return parsed
+    if source_filename.lower().endswith(".csv"):
+        return _parse_metadata_csv_bytes(raw, source_filename=source_filename, show_errors=False)
+    return {}
+
+
 def _parse_metadata_csv_bytes(raw: bytes, source_filename: str, show_errors: bool = True) -> dict[str, pd.DataFrame]:
     df = read_csvBytes_with_sniffer(raw)
     if df.empty or "name" not in {str(c).strip().lower() for c in df.columns}:
@@ -1151,55 +1305,17 @@ def import_metadata_from_file(uploaded_file) -> dict[str, pd.DataFrame]:
             return _parse_metadata_csv_bytes(raw, source_filename=source_filename, show_errors=True)
 
         elif name.endswith('.json'):
-            # TODO: check for ingestions of these kind of formats
-            st.error('🚧 JSON metadata import not yet implemented.')
-            # text = raw.decode("utf-8")
-            # j = json.loads(text)
-
-            # if isinstance(j, dict) and j.get('fields'):
-            #     rows = []
-            #     for f in j['fields']:
-            #         rows.append({
-            #             'name': f.get('name'),
-            #             'column_type': f.get('type') or '',
-            #             'column_format': '',
-            #             'concept': f.get('concept') or f.get('title') or '',
-            #             'element': f.get('title') or '',
-            #             'element_uri': f.get('element_uri') or f.get('element_uri') or f.get('concept_uri') or '',
-            #             'unit_symbol': f.get('unit_symbol') or f.get('unit') or '',
-            #             'unit_uri': f.get('unit_uri') or f.get('unit uri') or '',
-            #             'quantity_kind_uri': f.get('quantity_kind_uri') or f.get('quantity_kind_uri') or '',
-            #             'method': f.get('method') or '',
-            #             'description': f.get('description') or '',
-            #         })
-            #     return pd.DataFrame(rows)
-
-            # if isinstance(j, dict) and j.get('tableSchema') and j['tableSchema'].get('columns'):
-            #     rows = []
-            #     for f in j['tableSchema']['columns']:
-            #         rows.append({
-            #             'name': f.get('name'),
-            #             'column_type': f.get('datatype') or f.get('column_type') or '',
-            #             'column_format': '',
-            #             'concept': f.get('concept') or '',
-            #             'element': (f.get('titles') or [''])[0] if isinstance(f.get('titles'), list) else (f.get('titles') or ''),
-            #             'element_uri': f.get('element_uri') or f.get('element_uri') or f.get('concept_uri') or '',
-            #             'unit_symbol': f.get('unit_symbol') or f.get('schema:unitCode') or f.get('unit') or '',
-            #             'unit_uri': f.get('unit_uri') or f.get('unit uri') or '',
-            #             'quantity_kind_uri': f.get('quantity_kind_uri') or f.get('quantity_kind_uri') or '',
-            #             'method': f.get('method') or '',
-            #             'description': f.get('dc:description') or f.get('description') or '',
-            #         })
-            #     return pd.DataFrame(rows)
-
-            # st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
-            # return None
+            parsed = _parse_csvw_json_bytes(raw, source_filename=source_filename)
+            if parsed:
+                return parsed
+            st.error('Unrecognized JSON metadata format (expecting TableSchema or CSVW).')
+            return {}
         else:
             st.error('Unsupported metadata file type. Upload a CSV or JSON.')
-            return None
+            return {}
     except Exception as e:
         st.error(f'Failed to parse metadata file: {e}')
-        return None
+        return {}
     
 @st.cache_data()
 def get_record_id_from_Zenodo_url(url:str):
@@ -1432,6 +1548,11 @@ def process_zip_from_url(file_url: str, tabular_dict: dict, context_files: list,
                 raw = f.read()
 
             # Reuse your existing readers:
+            if member_basename.lower().endswith(".json"):
+                parsed_metadata = _try_parse_remote_metadata_bytes(raw, member_basename)
+                if parsed_metadata and imported_metadata_by_filename is not None:
+                    imported_metadata_by_filename.update(parsed_metadata)
+                continue
             if member_basename.lower().endswith(".csv"):
                 if _is_ignored_remote_csv_filename(member_basename):
                     continue
@@ -1695,6 +1816,7 @@ if _need_processing:
         # https://zenodo.org/records/19177539 -> connected CSV's
         # https://zenodo.org/records/19723699 -> Echo repo
         # https://zenodo.org/records/14610222 -> Hungarian Soil Degradation with readme in description
+        # https://zenodo.org/records/19722513 -> Annotated Echo example
 
         #######################################################
         zenodo_cache_key = f"_zenodo_ingest_cache_{_record_id}"
@@ -1707,7 +1829,7 @@ if _need_processing:
             zipped_context_files.extend(list(cached_zenodo["zipped_context_files"]))
             remote_imported_metadata_by_filename = dict(cached_zenodo.get("imported_metadata_by_filename_remote", {}))
         else:
-            filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
+            filtered_extensions_tabular = ['.csv', '.xlsx', '.xls', '.json']
             files_url_tabular = get_files_URL_from_Zenodo_id(_record_id, extensions=filtered_extensions_tabular)
 
             filtered_extensions_zip = ['.zip']
@@ -1732,6 +1854,10 @@ if _need_processing:
                     for sheet_name, df in df_dict.items():
                         tabular_dict[f"{name_file} | {sheet_name}"] = df
                         filename_dict[name_file] = file_url
+                elif ext_file == '.json':
+                    parsed_metadata = _try_parse_remote_metadata_bytes(file_response.content, name_file)
+                    if parsed_metadata:
+                        remote_imported_metadata_by_filename.update(parsed_metadata)
                 elif ext_file == '.csv':
                     if _is_ignored_remote_csv_filename(name_file):
                         continue
@@ -1776,7 +1902,7 @@ if _need_processing:
         # https://github.com/soilwise-he/soil-observation-data-encodings/tree/main/EXAMPLES/example5/meetpunten_bodemlocatie_2021-032627_1912_CN_SWC
 
         #######################################################
-        filtered_extensions_tabular = ['.csv', '.xlsx', '.xls']
+        filtered_extensions_tabular = ['.csv', '.xlsx', '.xls', '.json']
         filtered_extensions_zip = ['.zip']
         filtered_extensions_context = ['.doc', '.docx', '.pdf', '.md', '.txt']
         github_cache_seed = "|".join(sorted(_github_urls) + [GITHUB_INGEST_SCHEMA_VERSION])
@@ -1826,6 +1952,10 @@ if _need_processing:
                             table_key = build_github_table_key(raw_url, source_url=github_input_url, sheet_name=sheet_name)
                             tabular_dict[table_key] = df
                             filename_dict[table_key] = raw_url
+                    elif ext_file == '.json':
+                        parsed_metadata = _try_parse_remote_metadata_bytes(file_response.content, name_file)
+                        if parsed_metadata:
+                            remote_imported_metadata_by_filename.update(parsed_metadata)
                     elif ext_file == '.csv':
                         if _is_ignored_remote_csv_filename(name_file):
                             continue
@@ -2174,7 +2304,7 @@ if tabular_dict:
             # TODO: BUG: still some problems with UI and codelist input persistency. Especially after deletion of information about these whole codelist URI
             if not codelist_rows.empty:
                 st.markdown("#### Codelist annotation")
-                st.caption("For codelist columns, either provide one URI for the whole list or annotate each distinct dataset value with its own URI and description.")
+                st.caption("Where feasible, add semantic annotations to codelist columns. This can be done at the codelist level (one URI) or at the individual value level. Any additional annotation is valuable and can help others better understand and reuse your data.")
 
                 for _, codelist_row in codelist_rows.iterrows():
                     column_name = str(codelist_row["name"])
@@ -2185,7 +2315,7 @@ if tabular_dict:
                     current_codelist_row = metadata_df_current.loc[row_index].copy()
                     state_keys = _sync_codelist_form_state(key, column_name, df[column_name], current_codelist_row)
 
-                    with st.expander(f"{column_name}", expanded=False):
+                    with st.expander(f"{column_name}", expanded=True):
                         mode_label = st.radio(
                             "How do you want to annotate this codelist?",
                             options=["Whole codelist URI", "Annotate dataset values"],
