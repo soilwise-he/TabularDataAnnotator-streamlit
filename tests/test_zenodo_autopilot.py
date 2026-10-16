@@ -205,6 +205,53 @@ def test_generate_keyword_matches_falls_back_to_direct_batch_matching():
     assert result["sample_date"][0]["uri"] == "http://example.com/date"
 
 
+def test_generate_keyword_matches_sets_module_global_model_for_app_matcher(monkeypatch):
+    autopilot = __import__("zenodo_autopilot")
+
+    class FakeModel:
+        def encode(self, text, normalize_embeddings=True):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    fake_index = types.SimpleNamespace()
+    fake_index.search = lambda vec, k: (
+        np.array([[0.8]], dtype="float32"),
+        np.array([[0]], dtype="int32"),
+    )
+    fake_model = FakeModel()
+
+    fake_module = types.ModuleType("fake_keyword_matcher")
+    fake_module.model = None
+    fake_module.fake_model = fake_model
+    fake_module.load_vocab_indexes = lambda modelname="all-MiniLM-L6-v2": (
+        fake_index,
+        {0: {"uri": "http://example.com/soil", "label": "soil", "source": "ansis", "QC_label": "prefLabel", "definition": "soil"}},
+    )
+    fake_module.load_sentence_model = lambda modelname: fake_model
+
+    exec(
+        "def find_nearest_vocab(df_descriptions, _index_lib, meta_data_dict, k_nearest=4):\n"
+        "    assert model is fake_model\n"
+        "    return [{'query': 'soil_moisture', 'Distance': 0.1, 'uri': 'http://example.com/soil', 'source': 'ansis', 'label': 'soil', 'QC_label': 'prefLabel'}]\n",
+        fake_module.__dict__,
+    )
+    fake_module.find_nearest_vocab = fake_module.__dict__["find_nearest_vocab"]
+
+    monkeypatch.setattr(autopilot, "_load_module", lambda *args, **kwargs: fake_module)
+
+    metadata = {
+        "example_table": pd.DataFrame({
+            "name": ["soil_moisture"],
+            "description": ["soil moisture content"],
+        })
+    }
+
+    result = autopilot._generate_keyword_matches_for_metadata(metadata, source_filter={"ansis"})
+
+    assert result["example_table"]["soil_moisture"][0]["uri"] == "http://example.com/soil"
+    assert fake_module.model is fake_model
+    assert fake_module.__dict__["model"] is fake_model
+
+
 def test_generate_keyword_matches_handles_raw_faiss_metadata_without_normalized_keys():
     autopilot = __import__("zenodo_autopilot")
 

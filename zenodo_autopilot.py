@@ -1424,6 +1424,8 @@ def _generate_keyword_matches_for_metadata(
                     if hasattr(matcher_module, "load_sentence_model"):
                         matcher_module.model = matcher_module.load_sentence_model(modelname=modelname)
                 model = getattr(matcher_module, "model", None)
+                if model is not None:
+                    matcher_module.__dict__["model"] = model
             except Exception:
                 model = None
 
@@ -1445,6 +1447,9 @@ def _generate_keyword_matches_for_metadata(
                 metadata["source"] = str(metadata.get("source") or "").removeprefix("local_vocabularies:")
                 vocab_dict[int(identifier)] = metadata
             model = SentenceTransformer(modelname)
+            if matcher_module is not None:
+                matcher_module.model = model
+                matcher_module.__dict__["model"] = model
         except Exception:
             index_lib = None
             vocab_dict = {}
@@ -1478,7 +1483,14 @@ def _generate_keyword_matches_for_metadata(
 
         try:
             if matcher_module is not None and hasattr(matcher_module, "find_nearest_vocab"):
-                raw_hits = matcher_module.find_nearest_vocab(candidate_df, index_lib, vocab_dict, k_nearest=k_nearest)
+                if model is None and hasattr(matcher_module, "load_sentence_model"):
+                    model = matcher_module.load_sentence_model(modelname=modelname)
+                if model is not None:
+                    matcher_module.model = model
+                    matcher_module.__dict__["model"] = model
+                    raw_hits = matcher_module.find_nearest_vocab(candidate_df, index_lib, vocab_dict, k_nearest=k_nearest)
+                else:
+                    raw_hits = []
             else:
                 raw_hits = []
         except TypeError:
