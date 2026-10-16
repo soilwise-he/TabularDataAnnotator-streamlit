@@ -1,0 +1,795 @@
+{
+  "@context": [
+    "http://www.w3.org/ns/csvw",
+    {
+      "@language": "en",
+      "dc": "http://purl.org/dc/terms/",
+      "schema": "https://schema.org/",
+      "sosa": "http://www.w3.org/ns/sosa/",
+      "qudt": "http://qudt.org/schema/qudt/",
+      "unit": "https://schema.org/unitText",
+      "method": "https://schema.org/measurementTechnique"
+    }
+  ],
+  "dc:title": "ECHOREPO Soil Dataset: soil observations, parameters, images and biodiversity",
+  "dc:description": "Canonical ECHOREPO soil data resources with machine-readable CSVW metadata for SoilWise interoperability.",
+  "dc:creator": [
+    "Osychenko, Oleg"
+  ],
+  "dc:license": {
+    "@id": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "dc:source": {
+    "@id": "https://echorepo.quanta-labs.com/api/v1/canonical/all.zip"
+  },
+  "dc:modified": "2026-08-07T11:25:41+00:00",
+  "schema:inLanguage": "en",
+  "tables": [
+    {
+      "url": "analysis_methods.csv",
+      "dc:title": "ECHOREPO analysis methods",
+      "dc:description": "Reference table defining the compact laboratory method codes used by sample_parameters.csv and parameter_definitions.csv, including short names, full method descriptions and reviewed procedure URIs where available.",
+      "schema:numberOfItems": 1,
+      "schema:contentSize": 194,
+      "schema:sha256": "dde2f8234fb8c3446a463c5b5c58f8e76292197b2670b68be291a052c6a2aaf8",
+      "dialect": {
+        "encoding": "utf-8",
+        "delimiter": ",",
+        "header": true
+      },
+      "tableSchema": {
+        "columns": [
+          {
+            "name": "method_code",
+            "titles": [
+              "Analysis method code"
+            ],
+            "datatype": "string",
+            "description": "Compact code identifying the laboratory analysis method. The method is defined in analysis_methods.csv."
+          },
+          {
+            "name": "method_name",
+            "titles": [
+              "Analysis method name"
+            ],
+            "datatype": "string",
+            "description": "Short human-readable name of the laboratory method represented by method_code.",
+            "propertyUrl": "https://schema.org/name"
+          },
+          {
+            "name": "method_description",
+            "titles": [
+              "Analysis method description"
+            ],
+            "datatype": "string",
+            "description": "Human-readable description of the laboratory procedure represented by method_code.",
+            "propertyUrl": "http://purl.org/dc/terms/description"
+          },
+          {
+            "name": "procedure_uri",
+            "titles": [
+              "Procedure URI"
+            ],
+            "datatype": "anyURI",
+            "description": "Persistent URI identifying the laboratory procedure represented by method_code, where a reviewed vocabulary mapping is available.",
+            "propertyUrl": "http://www.w3.org/ns/sosa/usedProcedure"
+          }
+        ],
+        "primaryKey": "method_code"
+      }
+    },
+    {
+      "url": "parameter_definitions.csv",
+      "dc:title": "ECHOREPO parameter definitions",
+      "dc:description": "Reference table defining the compact parameter codes used in sample_parameters.csv. It provides human-readable names, reviewed semantic URIs, default units, method codes and parameter descriptions.",
+      "schema:numberOfItems": 16,
+      "schema:contentSize": 1000,
+      "schema:sha256": "f0d8c12e8692f8beb9b5d91e3dff623c5db0a749665aafeb0639a9f53aa75551",
+      "dialect": {
+        "encoding": "utf-8",
+        "delimiter": ",",
+        "header": true
+      },
+      "tableSchema": {
+        "columns": [
+          {
+            "name": "parameter_code",
+            "titles": [
+              "Parameter code"
+            ],
+            "datatype": "string",
+            "description": "Compact code identifying the measured elemental parameter. The corresponding human-readable definition and semantic URI are given in parameter_definitions.csv."
+          },
+          {
+            "name": "parameter_name",
+            "titles": [
+              "Parameter name"
+            ],
+            "datatype": "string",
+            "description": "Human-readable name of the parameter identified by parameter_code.",
+            "propertyUrl": "https://schema.org/name"
+          },
+          {
+            "name": "parameter_uri",
+            "titles": [
+              "Observed-property URI"
+            ],
+            "datatype": "anyURI",
+            "description": "Persistent URI identifying the soil property or elemental concentration represented by parameter_code, where a reviewed mapping is available.",
+            "propertyUrl": "http://www.w3.org/ns/sosa/observedProperty"
+          },
+          {
+            "name": "default_unit",
+            "titles": [
+              "Default unit"
+            ],
+            "datatype": "string",
+            "description": "Default human-readable unit associated with the parameter definition. The actual unit for each measurement is retained in sample_parameters.csv.",
+            "propertyUrl": "https://schema.org/unitText"
+          },
+          {
+            "name": "method_code",
+            "titles": [
+              "Analysis method code"
+            ],
+            "datatype": "string",
+            "description": "Compact code identifying the laboratory analysis method. The method is defined in analysis_methods.csv."
+          },
+          {
+            "name": "parameter_description",
+            "titles": [
+              "Parameter description"
+            ],
+            "datatype": "string",
+            "description": "Human-readable description of the parameter represented by parameter_code.",
+            "propertyUrl": "http://purl.org/dc/terms/description"
+          }
+        ],
+        "primaryKey": "parameter_code",
+        "foreignKeys": [
+          {
+            "columnReference": "method_code",
+            "reference": {
+              "resource": "analysis_methods.csv",
+              "columnReference": "method_code"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "url": "sample_biodiversity.csv",
+      "dc:title": "ECHOREPO sample microbial biodiversity observations",
+      "dc:description": "Microbial taxonomic abundance statistics by reported taxonomic rank associated with ECHOREPO samples and molecular markers. The ingested_datetime_utc field is an ECHOREPO ingestion timestamp, not a laboratory analysis timestamp.",
+      "schema:numberOfItems": 26475,
+      "schema:contentSize": 3204476,
+      "schema:sha256": "9fb8068e0a8e48d08394c0b9b2fe0bc3906ef2240991a27bd8531a20611b9f48",
+      "dialect": {
+        "encoding": "utf-8",
+        "delimiter": ",",
+        "header": true
+      },
+      "tableSchema": {
+        "columns": [
+          {
+            "name": "sample_id",
+            "titles": [
+              "Sample identifier"
+            ],
+            "datatype": "string",
+            "description": "Unique identifier of the ECHOREPO soil sample.",
+            "propertyUrl": "http://purl.org/dc/terms/identifier",
+            "required": true
+          },
+          {
+            "name": "country_code",
+            "titles": [
+              "Country code"
+            ],
+            "datatype": "string",
+            "description": "ISO 3166-1 alpha-2 country code associated with the published sample location.",
+            "propertyUrl": "https://schema.org/addressCountry"
+          },
+          {
+            "name": "marker",
+            "titles": [
+              "Molecular marker"
+            ],
+            "datatype": "string",
+            "description": "Molecular marker or assay target used for the microbial biodiversity observation, for example 16S or ITS.",
+            "propertyUrl": "https://schema.org/measurementTechnique"
+          },
+          {
+            "name": "taxon_rank",
+            "titles": [
+              "Taxonomic rank"
+            ],
+            "datatype": "string",
+            "description": "Taxonomic rank at which the microbial abundance result is reported, for example Phylum.",
+            "propertyUrl": "http://rs.tdwg.org/dwc/terms/taxonRank"
+          },
+          {
+            "name": "scientific_name",
+            "titles": [
+              "Scientific name"
+            ],
+            "datatype": "string",
+            "description": "Scientific name assigned to the microbial taxon by the source biodiversity workflow.",
+            "propertyUrl": "http://rs.tdwg.org/dwc/terms/scientificName"
+          },
+          {
+            "name": "read_count",
+            "titles": [
+              "Sequence read count"
+            ],
+            "datatype": "integer",
+            "description": "Number of sequencing reads assigned to the reported taxon for the corresponding sample and molecular marker. This is a sequencing-read count, not a count of organisms.",
+            "unit": "count"
+          },
+          {
+            "name": "relative_abundance_pct",
+            "titles": [
+              "Relative abundance"
+            ],
+            "datatype": "number",
+            "description": "Relative abundance percentage reported for the taxon in the corresponding sample and molecular-marker aggregation.",
+            "unit": "%"
+          },
+          {
+            "name": "ingested_datetime_utc",
+            "titles": [
+              "Biodiversity result ingestion date and time"
+            ],
+            "datatype": "datetime",
+            "description": "Date and time at which the biodiversity abundance row was uploaded/ingested into ECHOREPO, normalized to UTC. The source is sample_taxon_abundance.uploaded_at; it must not be interpreted as the laboratory analysis date.",
+            "propertyUrl": "http://purl.org/dc/terms/created"
+          },
+          {
+            "name": "source_file",
+            "titles": [
+              "Source file"
+            ],
+            "datatype": "string",
+            "description": "Name of the source biodiversity file from which the canonical abundance row was derived.",
+            "propertyUrl": "http://purl.org/dc/terms/source"
+          },
+          {
+            "name": "licence",
+            "titles": [
+              "Licence"
+            ],
+            "datatype": "string",
+            "description": "Licence statement associated with the row or source data.",
+            "propertyUrl": "http://purl.org/dc/terms/license"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "columnReference": "sample_id",
+            "reference": {
+              "resource": "samples.csv",
+              "columnReference": "sample_id"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "url": "sample_images.csv",
+      "dc:title": "ECHOREPO sample images",
+      "dc:description": "Image resources and image metadata associated with ECHOREPO soil samples. Image URLs should resolve to public HTTPS resources before Zenodo publication.",
+      "schema:numberOfItems": 20481,
+      "schema:contentSize": 4179161,
+      "schema:sha256": "57e8d08aec4c491bdd04ea250cc19ee13c32f7c87d4749f82796b70db0e06da3",
+      "dialect": {
+        "encoding": "utf-8",
+        "delimiter": ",",
+        "header": true
+      },
+      "tableSchema": {
+        "columns": [
+          {
+            "name": "sample_id",
+            "titles": [
+              "Sample identifier"
+            ],
+            "datatype": "string",
+            "description": "Unique identifier of the ECHOREPO soil sample.",
+            "propertyUrl": "http://purl.org/dc/terms/identifier",
+            "required": true
+          },
+          {
+            "name": "country_code",
+            "titles": [
+              "Country code"
+            ],
+            "datatype": "string",
+            "description": "ISO 3166-1 alpha-2 country code associated with the published sample location.",
+            "propertyUrl": "https://schema.org/addressCountry"
+          },
+          {
+            "name": "image_id",
+            "titles": [
+              "Image identifier"
+            ],
+            "datatype": "string",
+            "description": "Identifier of an image associated with an ECHOREPO soil sample.",
+            "propertyUrl": "http://purl.org/dc/terms/identifier"
+          },
+          {
+            "name": "image_url",
+            "titles": [
+              "Image URL"
+            ],
+            "datatype": "anyURI",
+            "description": "Public URL from which the image associated with the sample can be accessed.",
+            "propertyUrl": "https://schema.org/contentUrl"
+          },
+          {
+            "name": "image_description_orig",
+            "titles": [
+              "Image description, original language"
+            ],
+            "datatype": "string",
+            "description": "Participant-provided image description in the original submitted language.",
+            "propertyUrl": "http://purl.org/dc/terms/description"
+          },
+          {
+            "name": "image_description_en",
+            "titles": [
+              "Image description, English"
+            ],
+            "datatype": "string",
+            "description": "English representation or translation of the image description.",
+            "propertyUrl": "http://purl.org/dc/terms/description"
+          },
+          {
+            "name": "collected_by",
+            "titles": [
+              "Collector identifier"
+            ],
+            "datatype": "string",
+            "description": "Internal or pseudonymous identifier associated with the participant or process that collected the record. Publication of this field should be reviewed against the ECHO privacy/consent policy.",
+            "propertyUrl": "http://purl.org/dc/terms/creator"
+          },
+          {
+            "name": "image_datetime_utc",
+            "titles": [
+              "Image date and time"
+            ],
+            "datatype": "datetime",
+            "description": "Date and time associated with the image record, normalized to UTC in ISO 8601 format.",
+            "propertyUrl": "http://purl.org/dc/terms/created"
+          },
+          {
+            "name": "licence",
+            "titles": [
+              "Licence"
+            ],
+            "datatype": "string",
+            "description": "Licence statement associated with the row or source data.",
+            "propertyUrl": "http://purl.org/dc/terms/license"
+          }
+        ],
+        "primaryKey": [
+          "sample_id",
+          "image_id"
+        ],
+        "foreignKeys": [
+          {
+            "columnReference": "sample_id",
+            "reference": {
+              "resource": "samples.csv",
+              "columnReference": "sample_id"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "url": "sample_parameters.csv",
+      "dc:title": "ECHOREPO sample laboratory parameters",
+      "dc:description": "Compact long-form elemental concentration measurements associated with ECHOREPO soil samples. parameter_code refers to parameter_definitions.csv and method_code refers to analysis_methods.csv, avoiding repetition of human-readable labels, descriptions and semantic URIs in every measurement row.",
+      "schema:numberOfItems": 50927,
+      "schema:contentSize": 4480975,
+      "schema:sha256": "9039a655c5d297141b4a8fa4a5022fe6c9f62313e459da2082cc9a8e0da5ac79",
+      "dialect": {
+        "encoding": "utf-8",
+        "delimiter": ",",
+        "header": true
+      },
+      "tableSchema": {
+        "columns": [
+          {
+            "name": "sample_id",
+            "titles": [
+              "Sample identifier"
+            ],
+            "datatype": "string",
+            "description": "Unique identifier of the ECHOREPO soil sample.",
+            "propertyUrl": "http://purl.org/dc/terms/identifier",
+            "required": true
+          },
+          {
+            "name": "country_code",
+            "titles": [
+              "Country code"
+            ],
+            "datatype": "string",
+            "description": "ISO 3166-1 alpha-2 country code associated with the published sample location.",
+            "propertyUrl": "https://schema.org/addressCountry"
+          },
+          {
+            "name": "parameter_code",
+            "titles": [
+              "Parameter code"
+            ],
+            "datatype": "string",
+            "description": "Compact code identifying the measured elemental parameter. The corresponding human-readable definition and semantic URI are given in parameter_definitions.csv."
+          },
+          {
+            "name": "result_value",
+            "titles": [
+              "Measurement result"
+            ],
+            "datatype": "number",
+            "description": "Numeric measurement result. The measured property is identified by parameter_code and defined in parameter_definitions.csv.",
+            "propertyUrl": "http://www.w3.org/ns/sosa/hasSimpleResult"
+          },
+          {
+            "name": "unit",
+            "titles": [
+              "Unit"
+            ],
+            "datatype": "string",
+            "description": "Unit in which result_value is expressed for this measurement, for example mg/kg.",
+            "propertyUrl": "https://schema.org/unitText"
+          },
+          {
+            "name": "method_code",
+            "titles": [
+              "Analysis method code"
+            ],
+            "datatype": "string",
+            "description": "Compact code identifying the laboratory analysis method. The method is defined in analysis_methods.csv."
+          },
+          {
+            "name": "analysis_datetime_utc",
+            "titles": [
+              "Analysis date and time"
+            ],
+            "datatype": "datetime",
+            "description": "Date and time associated with the laboratory analysis, normalized to UTC in ISO 8601 format.",
+            "propertyUrl": "http://www.w3.org/ns/sosa/resultTime"
+          },
+          {
+            "name": "lab_id",
+            "titles": [
+              "Laboratory identifier"
+            ],
+            "datatype": "string",
+            "description": "Identifier of the laboratory or laboratory workflow responsible for the measurement.",
+            "propertyUrl": "http://purl.org/dc/terms/identifier"
+          },
+          {
+            "name": "licence",
+            "titles": [
+              "Licence"
+            ],
+            "datatype": "string",
+            "description": "Licence statement associated with the row or source data.",
+            "propertyUrl": "http://purl.org/dc/terms/license"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "columnReference": "sample_id",
+            "reference": {
+              "resource": "samples.csv",
+              "columnReference": "sample_id"
+            }
+          },
+          {
+            "columnReference": "parameter_code",
+            "reference": {
+              "resource": "parameter_definitions.csv",
+              "columnReference": "parameter_code"
+            }
+          },
+          {
+            "columnReference": "method_code",
+            "reference": {
+              "resource": "analysis_methods.csv",
+              "columnReference": "method_code"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "url": "samples.csv",
+      "dc:title": "ECHOREPO canonical soil samples",
+      "dc:description": "Canonical sample-level ECHOREPO records for discrete 0-30 cm soil sampling events, including published location, field-estimated soil pH, soil organic matter estimate, earthworm count, visible-pollutant observations, soil structure, soil texture and free-text observations.",
+      "schema:numberOfItems": 8116,
+      "schema:contentSize": 1733290,
+      "schema:sha256": "d72486b56c7870fe5e8d65cd136c6054f3692ea0e6597323e1ae33002dcfda4f",
+      "dialect": {
+        "encoding": "utf-8",
+        "delimiter": ",",
+        "header": true
+      },
+      "tableSchema": {
+        "columns": [
+          {
+            "name": "sample_id",
+            "titles": [
+              "Sample identifier"
+            ],
+            "datatype": "string",
+            "description": "Unique identifier of the ECHOREPO soil sample.",
+            "propertyUrl": "http://purl.org/dc/terms/identifier",
+            "required": true
+          },
+          {
+            "name": "sampling_datetime_utc",
+            "titles": [
+              "Sampling date and time"
+            ],
+            "datatype": "datetime",
+            "description": "Date and time at which the soil sampling event was recorded, normalized to UTC in ISO 8601 format.",
+            "propertyUrl": "http://www.w3.org/ns/sosa/phenomenonTime"
+          },
+          {
+            "name": "lat",
+            "titles": [
+              "Latitude"
+            ],
+            "datatype": "number",
+            "description": "Latitude of the published sample location in decimal degrees using WGS 84 (EPSG:4326).",
+            "propertyUrl": "http://www.w3.org/2003/01/geo/wgs84_pos#lat",
+            "unit": "decimal degree"
+          },
+          {
+            "name": "lon",
+            "titles": [
+              "Longitude"
+            ],
+            "datatype": "number",
+            "description": "Longitude of the published sample location in decimal degrees using WGS 84 (EPSG:4326).",
+            "propertyUrl": "http://www.w3.org/2003/01/geo/wgs84_pos#long",
+            "unit": "decimal degree"
+          },
+          {
+            "name": "country_code",
+            "titles": [
+              "Country code"
+            ],
+            "datatype": "string",
+            "description": "ISO 3166-1 alpha-2 country code associated with the published sample location.",
+            "propertyUrl": "https://schema.org/addressCountry"
+          },
+          {
+            "name": "coordinate_obfuscation_radius_m",
+            "titles": [
+              "Coordinate obfuscation radius"
+            ],
+            "datatype": "number",
+            "description": "Radius, in metres, used to spatially obfuscate the published sample coordinates in ECHOREPO for privacy protection. The published latitude and longitude represent an obfuscated location rather than the exact sampling point.",
+            "unit": "m"
+          },
+          {
+            "name": "soil_ph_field",
+            "titles": [
+              "Field-estimated soil pH"
+            ],
+            "datatype": "number",
+            "description": "Soil pH estimated with the ECHO paper-strip protocol: mixed soil is added to distilled water until the mixture reaches 14 mL, shaken for 30 seconds, settled for 5 minutes, then a pH strip is immersed for 30 seconds and compared with the ECHO App colour chart.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilpH",
+            "unit": "pH",
+            "method": "ECHO simplified soil pH paper-strip method"
+          },
+          {
+            "name": "soil_organic_matter_estimate_pct",
+            "titles": [
+              "Estimated soil organic matter"
+            ],
+            "datatype": "number",
+            "description": "Estimated soil organic matter (SOM) percentage selected by visually comparing a spoonful of mixed soil with the ECHO App soil-colour chart. This is a field estimate of SOM and must not be interpreted as laboratory-measured soil organic carbon.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilOrganicMatter",
+            "unit": "%",
+            "method": "ECHO visual soil-colour chart estimation of soil organic matter"
+          },
+          {
+            "name": "earthworms_count",
+            "titles": [
+              "Earthworm count"
+            ],
+            "datatype": "integer",
+            "description": "Number of earthworms manually found while breaking apart the soil excavated from the ECHO sampling pit and recorded in the ECHO App.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#BiologicalAbundance",
+            "unit": "count",
+            "method": "ECHO manual earthworm-count protocol"
+          },
+          {
+            "name": "contamination_debris",
+            "titles": [
+              "Debris contamination observation"
+            ],
+            "datatype": "number",
+            "description": "Numeric ECHOREPO field derived from the ECHO visual-pollutant observation workflow for visible debris. The field protocol requires participants to observe visible fragments and record number and size; the exact encoding of this canonical field still needs to be confirmed.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilContaminants",
+            "method": "ECHO visual inspection for visible pollutants in and around the sampling pit"
+          },
+          {
+            "name": "contamination_plastic",
+            "titles": [
+              "Plastic contamination observation"
+            ],
+            "datatype": "number",
+            "description": "Numeric ECHOREPO field derived from the ECHO visual-pollutant observation workflow for visible plastic. The exact encoding of this canonical field still needs to be confirmed.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilContaminants",
+            "method": "ECHO visual inspection for visible pollutants in and around the sampling pit"
+          },
+          {
+            "name": "contamination_other_orig",
+            "titles": [
+              "Other contamination information, original language"
+            ],
+            "datatype": "string",
+            "description": "Participant-provided free-text information about other visible contamination or possible contamination sources, in the original submitted language.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilContaminants"
+          },
+          {
+            "name": "contamination_other_en",
+            "titles": [
+              "Other contamination information, English"
+            ],
+            "datatype": "string",
+            "description": "English representation or translation of participant-provided information about other visible contamination or possible contamination sources.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilContaminants"
+          },
+          {
+            "name": "pollutants_count",
+            "titles": [
+              "Visible pollutants count"
+            ],
+            "datatype": "integer",
+            "description": "Count field associated with the ECHO visible-pollutant observation workflow. The precise set of items represented by this count still needs to be confirmed from the app/export mapping.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilContaminants",
+            "unit": "count",
+            "method": "ECHO visual inspection for visible pollutants in and around the sampling pit"
+          },
+          {
+            "name": "soil_structure_orig",
+            "titles": [
+              "Soil structure, original language"
+            ],
+            "datatype": "string",
+            "description": "Soil-structure class recorded by the participant using the ECHO simplified VESS assessment, in the original submitted language.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilStructure",
+            "method": "ECHO simplified Visual Evaluation of Soil Structure (VESS), adapted from Ball et al. (2007)"
+          },
+          {
+            "name": "soil_structure_en",
+            "titles": [
+              "Soil structure, English"
+            ],
+            "datatype": "string",
+            "description": "English representation of the soil-structure class recorded using the ECHO simplified VESS assessment.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilStructure",
+            "method": "ECHO simplified Visual Evaluation of Soil Structure (VESS), adapted from Ball et al. (2007)"
+          },
+          {
+            "name": "soil_texture_orig",
+            "titles": [
+              "Soil texture, original language"
+            ],
+            "datatype": "string",
+            "description": "Soil-texture class recorded by the participant using the ECHO texture-by-feel workflow, in the original submitted language.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilTexture",
+            "method": "ECHO texture-by-feel method adapted from the USDA soil quality guide"
+          },
+          {
+            "name": "soil_texture_en",
+            "titles": [
+              "Soil texture, English"
+            ],
+            "datatype": "string",
+            "description": "English representation of the soil-texture class recorded using the ECHO texture-by-feel workflow.",
+            "propertyUrl": "https://w3id.org/eusoilvoc#SoilTexture",
+            "method": "ECHO texture-by-feel method adapted from the USDA soil quality guide"
+          },
+          {
+            "name": "observations_orig",
+            "titles": [
+              "Additional observations, original language"
+            ],
+            "datatype": "string",
+            "description": "Additional free-text observations submitted by the participant in the original language."
+          },
+          {
+            "name": "observations_en",
+            "titles": [
+              "Additional observations, English"
+            ],
+            "datatype": "string",
+            "description": "English representation or translation of the participant's additional free-text observations."
+          },
+          {
+            "name": "metals_info_orig",
+            "titles": [
+              "Metals information, original language"
+            ],
+            "datatype": "string",
+            "description": "Participant-provided free-text contextual information concerning metals or possible metal contamination, in the original submitted language."
+          },
+          {
+            "name": "metals_info_en",
+            "titles": [
+              "Metals information, English"
+            ],
+            "datatype": "string",
+            "description": "English representation or translation of participant-provided contextual information concerning metals or possible metal contamination."
+          },
+          {
+            "name": "collected_by",
+            "titles": [
+              "Collector identifier"
+            ],
+            "datatype": "string",
+            "description": "Internal or pseudonymous identifier associated with the participant or process that collected the record. Publication of this field should be reviewed against the ECHO privacy/consent policy.",
+            "propertyUrl": "http://purl.org/dc/terms/creator"
+          },
+          {
+            "name": "data_source",
+            "titles": [
+              "Data source"
+            ],
+            "datatype": "string",
+            "description": "Source system or workflow from which the canonical record was derived, for example the ECHO mobile application.",
+            "propertyUrl": "http://purl.org/dc/terms/source"
+          },
+          {
+            "name": "qa_status",
+            "titles": [
+              "Quality-assurance status"
+            ],
+            "datatype": "string",
+            "description": "ECHOREPO quality-assurance status assigned to the canonical sample record."
+          },
+          {
+            "name": "licence",
+            "titles": [
+              "Licence"
+            ],
+            "datatype": "string",
+            "description": "Licence statement associated with the row or source data.",
+            "propertyUrl": "http://purl.org/dc/terms/license"
+          }
+        ],
+        "primaryKey": "sample_id"
+      }
+    }
+  ],
+  "schema:additionalProperty": [
+    {
+      "@type": "schema:PropertyValue",
+      "schema:name": "Coordinate reference system",
+      "schema:value": "WGS 84 (EPSG:4326)"
+    },
+    {
+      "@type": "schema:PropertyValue",
+      "schema:name": "Sampling depth",
+      "schema:value": "0-30 cm"
+    },
+    {
+      "@type": "schema:PropertyValue",
+      "schema:name": "Sampling method",
+      "schema:value": "ECHO discrete soil sampling protocol: one sampling location per kit, using a 30 x 30 x 30 cm soil pit after removing litter and surface material."
+    }
+  ],
+  "dc:identifier": {
+    "@id": "https://doi.org/10.5281/zenodo.21837774"
+  },
+  "dc:rights": "© 2026 ECHO Horizon Project"
+}

@@ -1,0 +1,316 @@
+{
+  "record_id": "14726493",
+  "url": "https://zenodo.org/records/14726493",
+  "table_count": 1,
+  "tables": {
+    "Effects_Reduced_N_fertilization.csv": {
+      "table_name": "Effects_Reduced_N_fertilization.csv",
+      "shape": [
+        2400,
+        18
+      ],
+      "columns": [
+        "fk_target",
+        "codelist_annotation_mode",
+        "codelist_uri",
+        "codelist_items",
+        "NUTS2 code",
+        "Crop type",
+        "Country",
+        "Clay content (%)",
+        "Annual \nprecipitation (mm)",
+        "Mean annual \nair temperature\n(°C)",
+        "Annual \nevapotranspiration (mm)",
+        "Crop residues \n(kg ha UAA-1 yr-1)",
+        "Organic matter input \n(kg ha UAA-1 yr-1)",
+        "Mineral N input \n(kg ha-1 yr-1)",
+        "Change in N2O \nemissions (kg N ha-1 yr-1)",
+        "Change in NO3 \nleaching (kg N ha-1 yr-1)",
+        "Change in SOC stock\n (t C ha-1 30 years-1)",
+        "Change in \nyield (%)"
+      ],
+      "bucket_map": {
+        "fk_target": "FOI - Attribute",
+        "codelist_annotation_mode": "FOI - Attribute",
+        "codelist_uri": "FOI - Attribute",
+        "codelist_items": "FOI - Attribute",
+        "NUTS2 code": "FOI - Attribute",
+        "Crop type": "FOI - Attribute",
+        "Country": "FOI - Attribute",
+        "Clay content (%)": "FOI - Attribute",
+        "Annual \nprecipitation (mm)": "FOI - Attribute",
+        "Mean annual \nair temperature\n(°C)": "Observed Property",
+        "Annual \nevapotranspiration (mm)": "FOI - Attribute",
+        "Crop residues \n(kg ha UAA-1 yr-1)": "FOI - Attribute",
+        "Organic matter input \n(kg ha UAA-1 yr-1)": "FOI - Attribute",
+        "Mineral N input \n(kg ha-1 yr-1)": "FOI - Attribute",
+        "Change in N2O \nemissions (kg N ha-1 yr-1)": "FOI - Attribute",
+        "Change in NO3 \nleaching (kg N ha-1 yr-1)": "FOI - Attribute",
+        "Change in SOC stock\n (t C ha-1 30 years-1)": "FOI - Attribute",
+        "Change in \nyield (%)": "FOI - Attribute"
+      },
+      "numeric_columns": [],
+      "unit_candidates": {},
+      "variable_names": [
+        "fk_target",
+        "codelist_annotation_mode",
+        "codelist_uri",
+        "codelist_items",
+        "NUTS2 code",
+        "Crop type",
+        "Country",
+        "Clay content (%)",
+        "Annual \nprecipitation (mm)",
+        "Mean annual \nair temperature\n(°C)",
+        "Annual \nevapotranspiration (mm)",
+        "Crop residues \n(kg ha UAA-1 yr-1)",
+        "Organic matter input \n(kg ha UAA-1 yr-1)",
+        "Mineral N input \n(kg ha-1 yr-1)",
+        "Change in N2O \nemissions (kg N ha-1 yr-1)",
+        "Change in NO3 \nleaching (kg N ha-1 yr-1)",
+        "Change in SOC stock\n (t C ha-1 30 years-1)",
+        "Change in \nyield (%)"
+      ]
+    }
+  },
+  "downstream": {
+    "descriptions": {
+      "Effects_Reduced_N_fertilization.csv": [
+        {
+          "name": "fk_target",
+          "description": "fk_target"
+        },
+        {
+          "name": "codelist_annotation_mode",
+          "description": "codelist_annotation_mode"
+        },
+        {
+          "name": "codelist_uri",
+          "description": "codelist_uri"
+        },
+        {
+          "name": "codelist_items",
+          "description": "codelist_items"
+        },
+        {
+          "name": "NUTS2 code",
+          "description": "AD00"
+        },
+        {
+          "name": "Crop type",
+          "description": "Wheat"
+        },
+        {
+          "name": "Country",
+          "description": "Andora"
+        },
+        {
+          "name": "Clay content (%)",
+          "description": "15.864"
+        },
+        {
+          "name": "Annual \nprecipitation (mm)",
+          "description": "992.733"
+        },
+        {
+          "name": "Mean annual \nair temperature\n(°C)",
+          "description": "3.87"
+        },
+        {
+          "name": "Annual \nevapotranspiration (mm)",
+          "description": "733.212"
+        },
+        {
+          "name": "Crop residues \n(kg ha UAA-1 yr-1)",
+          "description": "Crop residues \n(kg ha UAA-1 yr-1)"
+        },
+        {
+          "name": "Organic matter input \n(kg ha UAA-1 yr-1)",
+          "description": "Organic matter input \n(kg ha UAA-1 yr-1)"
+        },
+        {
+          "name": "Mineral N input \n(kg ha-1 yr-1)",
+          "description": "Mineral N input \n(kg ha-1 yr-1)"
+        },
+        {
+          "name": "Change in N2O \nemissions (kg N ha-1 yr-1)",
+          "description": "Change in N2O \nemissions (kg N ha-1 yr-1)"
+        },
+        {
+          "name": "Change in NO3 \nleaching (kg N ha-1 yr-1)",
+          "description": "Change in NO3 \nleaching (kg N ha-1 yr-1)"
+        },
+        {
+          "name": "Change in SOC stock\n (t C ha-1 30 years-1)",
+          "description": "0.209"
+        },
+        {
+          "name": "Change in \nyield (%)",
+          "description": "Change in \nyield (%)"
+        }
+      ]
+    },
+    "unit_suggestions": {
+      "Effects_Reduced_N_fertilization.csv": [
+        {
+          "name": "fk_target",
+          "unit_symbol": ""
+        },
+        {
+          "name": "codelist_annotation_mode",
+          "unit_symbol": ""
+        },
+        {
+          "name": "codelist_uri",
+          "unit_symbol": ""
+        },
+        {
+          "name": "codelist_items",
+          "unit_symbol": ""
+        },
+        {
+          "name": "NUTS2 code",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Crop type",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Country",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Clay content (%)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Annual \nprecipitation (mm)",
+          "unit_symbol": "dS/m"
+        },
+        {
+          "name": "Mean annual \nair temperature\n(°C)",
+          "unit_symbol": "°C"
+        },
+        {
+          "name": "Annual \nevapotranspiration (mm)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Crop residues \n(kg ha UAA-1 yr-1)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Organic matter input \n(kg ha UAA-1 yr-1)",
+          "unit_symbol": "%"
+        },
+        {
+          "name": "Mineral N input \n(kg ha-1 yr-1)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Change in N2O \nemissions (kg N ha-1 yr-1)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Change in NO3 \nleaching (kg N ha-1 yr-1)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Change in SOC stock\n (t C ha-1 30 years-1)",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Change in \nyield (%)",
+          "unit_symbol": ""
+        }
+      ]
+    },
+    "method_suggestions": {
+      "Effects_Reduced_N_fertilization.csv": [
+        {
+          "name": "fk_target",
+          "method": ""
+        },
+        {
+          "name": "codelist_annotation_mode",
+          "method": ""
+        },
+        {
+          "name": "codelist_uri",
+          "method": ""
+        },
+        {
+          "name": "codelist_items",
+          "method": ""
+        },
+        {
+          "name": "NUTS2 code",
+          "method": ""
+        },
+        {
+          "name": "Crop type",
+          "method": ""
+        },
+        {
+          "name": "Country",
+          "method": ""
+        },
+        {
+          "name": "Clay content (%)",
+          "method": ""
+        },
+        {
+          "name": "Annual \nprecipitation (mm)",
+          "method": ""
+        },
+        {
+          "name": "Mean annual \nair temperature\n(°C)",
+          "method": ""
+        },
+        {
+          "name": "Annual \nevapotranspiration (mm)",
+          "method": ""
+        },
+        {
+          "name": "Crop residues \n(kg ha UAA-1 yr-1)",
+          "method": ""
+        },
+        {
+          "name": "Organic matter input \n(kg ha UAA-1 yr-1)",
+          "method": ""
+        },
+        {
+          "name": "Mineral N input \n(kg ha-1 yr-1)",
+          "method": ""
+        },
+        {
+          "name": "Change in N2O \nemissions (kg N ha-1 yr-1)",
+          "method": ""
+        },
+        {
+          "name": "Change in NO3 \nleaching (kg N ha-1 yr-1)",
+          "method": ""
+        },
+        {
+          "name": "Change in SOC stock\n (t C ha-1 30 years-1)",
+          "method": "ISO 10694:1995 - Soil quality - Determination of organic carbon"
+        },
+        {
+          "name": "Change in \nyield (%)",
+          "method": ""
+        }
+      ]
+    },
+    "relationships": []
+  },
+  "page_reuse": {
+    "context": {
+      "normalize_variable_name": {}
+    },
+    "column_sorting": {},
+    "unit_measurement": {},
+    "method_review": {}
+  },
+  "status": "ok"
+}

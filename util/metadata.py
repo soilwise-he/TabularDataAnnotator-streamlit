@@ -37,8 +37,6 @@ METADATA_COLUMN_ORDER = [
     "codelist_items",
 ]
 
-
-
 def safe_filename_component(value: str, fallback: str = "export") -> str:
     """Normalize arbitrary text into a filesystem-safe filename component."""
     text = str(value) if value is not None else ""
@@ -113,11 +111,6 @@ def normalize_metadata_columns(metadata_dict: Dict) -> Dict:
             continue
 
         md = table_df.copy()
-        if "fk_target" not in md.columns:
-            md["fk_target"] = ""
-        for col in ["codelist_annotation_mode", "codelist_uri", "codelist_items"]:
-            if col not in md.columns:
-                md[col] = ""
 
         has_legacy_columns = any(col in md.columns for col in LEGACY_COLUMN_RENAMES)
         if has_legacy_columns:

@@ -375,8 +375,10 @@ for tab, tbl in zip(_tabs, tab_labels):
 
 
         # Data preview for the current table
-        with st.expander(f"Table: {tbl}", expanded=False):
-            st.dataframe(st.session_state["tabular_data_dict_preview"][tbl], width='stretch')
+        preview_map = st.session_state.get("tabular_data_dict_preview")
+        if isinstance(preview_map, dict) and tbl in preview_map:
+            with st.expander(f"Table: {tbl}", expanded=False):
+                st.dataframe(st.session_state["tabular_data_dict_preview"][tbl], width='stretch')
 
         sorted_items = sort_items(
             items,

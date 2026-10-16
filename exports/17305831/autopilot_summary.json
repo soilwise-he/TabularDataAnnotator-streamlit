@@ -1,0 +1,346 @@
+{
+  "record_id": "17305831",
+  "url": "https://zenodo.org/records/17305831",
+  "table_count": 1,
+  "tables": {
+    "soc_som_all.csv": {
+      "table_name": "soc_som_all.csv",
+      "shape": [
+        9503,
+        20
+      ],
+      "columns": [
+        "fk_target",
+        "codelist_annotation_mode",
+        "codelist_uri",
+        "codelist_items",
+        "Dataset_name",
+        "Country",
+        "LOI_method",
+        "ID",
+        "Habitat",
+        "Soil_category",
+        "Depth_low",
+        "LOI_perc",
+        "TC_perc",
+        "SOC_perc",
+        "f_tc_or_soc",
+        "f_soc",
+        "f_som",
+        "f_c_in_som",
+        "f_oc",
+        "Data_reference"
+      ],
+      "bucket_map": {
+        "fk_target": "FOI - Attribute",
+        "codelist_annotation_mode": "FOI - Attribute",
+        "codelist_uri": "FOI - Attribute",
+        "codelist_items": "FOI - Attribute",
+        "Dataset_name": "FOI - Attribute",
+        "Country": "FOI - Attribute",
+        "LOI_method": "FOI - Attribute",
+        "ID": "Feature of Interest (FOI) - ID",
+        "Habitat": "FOI - Attribute",
+        "Soil_category": "FOI - Attribute",
+        "Depth_low": "FOI - Attribute",
+        "LOI_perc": "FOI - Attribute",
+        "TC_perc": "FOI - Attribute",
+        "SOC_perc": "FOI - Attribute",
+        "f_tc_or_soc": "FOI - Attribute",
+        "f_soc": "FOI - Attribute",
+        "f_som": "FOI - Attribute",
+        "f_c_in_som": "FOI - Attribute",
+        "f_oc": "FOI - Attribute",
+        "Data_reference": "FOI - Attribute"
+      },
+      "numeric_columns": [],
+      "unit_candidates": {},
+      "variable_names": [
+        "fk_target",
+        "codelist_annotation_mode",
+        "codelist_uri",
+        "codelist_items",
+        "Dataset_name",
+        "Country",
+        "LOI_method",
+        "ID",
+        "Habitat",
+        "Soil_category",
+        "Depth_low",
+        "LOI_perc",
+        "TC_perc",
+        "SOC_perc",
+        "f_tc_or_soc",
+        "f_soc",
+        "f_som",
+        "f_c_in_som",
+        "f_oc",
+        "Data_reference"
+      ]
+    }
+  },
+  "downstream": {
+    "descriptions": {
+      "soc_som_all.csv": [
+        {
+          "name": "fk_target",
+          "description": "fk_target"
+        },
+        {
+          "name": "codelist_annotation_mode",
+          "description": "codelist_annotation_mode"
+        },
+        {
+          "name": "codelist_uri",
+          "description": "codelist_uri"
+        },
+        {
+          "name": "codelist_items",
+          "description": "codelist_items"
+        },
+        {
+          "name": "Dataset_name",
+          "description": "CINAg"
+        },
+        {
+          "name": "Country",
+          "description": "Wales"
+        },
+        {
+          "name": "LOI_method",
+          "description": "375"
+        },
+        {
+          "name": "ID",
+          "description": "NewboroughO13A"
+        },
+        {
+          "name": "Habitat",
+          "description": "Calcareous Grassland"
+        },
+        {
+          "name": "Soil_category",
+          "description": "mineral"
+        },
+        {
+          "name": "Depth_low",
+          "description": "15.0"
+        },
+        {
+          "name": "LOI_perc",
+          "description": "1.73"
+        },
+        {
+          "name": "TC_perc",
+          "description": "0.7"
+        },
+        {
+          "name": "SOC_perc",
+          "description": "SOC_perc"
+        },
+        {
+          "name": "f_tc_or_soc",
+          "description": "0.007"
+        },
+        {
+          "name": "f_soc",
+          "description": "0.007"
+        },
+        {
+          "name": "f_som",
+          "description": "0.017"
+        },
+        {
+          "name": "f_c_in_som",
+          "description": "0.406"
+        },
+        {
+          "name": "f_oc",
+          "description": "f_oc"
+        },
+        {
+          "name": "Data_reference",
+          "description": "Reinsch, S. (2025). Soil organic carbon and soil organic matter measurements across habitats from the UK and Spain (Version 1) [Data set]. Zenodo. 10.5281/zenodo.17064290. Soil organic carbon and soil organic matter measurements across habitats from the UK and Spain (Version 1) [Data set]. Zenodo. 10.5281/zenodo.17064290"
+        }
+      ]
+    },
+    "unit_suggestions": {
+      "soc_som_all.csv": [
+        {
+          "name": "fk_target",
+          "unit_symbol": ""
+        },
+        {
+          "name": "codelist_annotation_mode",
+          "unit_symbol": ""
+        },
+        {
+          "name": "codelist_uri",
+          "unit_symbol": ""
+        },
+        {
+          "name": "codelist_items",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Dataset_name",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Country",
+          "unit_symbol": ""
+        },
+        {
+          "name": "LOI_method",
+          "unit_symbol": ""
+        },
+        {
+          "name": "ID",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Habitat",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Soil_category",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Depth_low",
+          "unit_symbol": "cm"
+        },
+        {
+          "name": "LOI_perc",
+          "unit_symbol": ""
+        },
+        {
+          "name": "TC_perc",
+          "unit_symbol": ""
+        },
+        {
+          "name": "SOC_perc",
+          "unit_symbol": ""
+        },
+        {
+          "name": "f_tc_or_soc",
+          "unit_symbol": ""
+        },
+        {
+          "name": "f_soc",
+          "unit_symbol": ""
+        },
+        {
+          "name": "f_som",
+          "unit_symbol": ""
+        },
+        {
+          "name": "f_c_in_som",
+          "unit_symbol": ""
+        },
+        {
+          "name": "f_oc",
+          "unit_symbol": ""
+        },
+        {
+          "name": "Data_reference",
+          "unit_symbol": ""
+        }
+      ]
+    },
+    "method_suggestions": {
+      "soc_som_all.csv": [
+        {
+          "name": "fk_target",
+          "method": ""
+        },
+        {
+          "name": "codelist_annotation_mode",
+          "method": ""
+        },
+        {
+          "name": "codelist_uri",
+          "method": ""
+        },
+        {
+          "name": "codelist_items",
+          "method": ""
+        },
+        {
+          "name": "Dataset_name",
+          "method": ""
+        },
+        {
+          "name": "Country",
+          "method": ""
+        },
+        {
+          "name": "LOI_method",
+          "method": ""
+        },
+        {
+          "name": "ID",
+          "method": ""
+        },
+        {
+          "name": "Habitat",
+          "method": ""
+        },
+        {
+          "name": "Soil_category",
+          "method": ""
+        },
+        {
+          "name": "Depth_low",
+          "method": ""
+        },
+        {
+          "name": "LOI_perc",
+          "method": ""
+        },
+        {
+          "name": "TC_perc",
+          "method": ""
+        },
+        {
+          "name": "SOC_perc",
+          "method": "ISO 10694:1995 - Soil quality - Determination of organic carbon"
+        },
+        {
+          "name": "f_tc_or_soc",
+          "method": "ISO 10694:1995 - Soil quality - Determination of organic carbon"
+        },
+        {
+          "name": "f_soc",
+          "method": "ISO 10694:1995 - Soil quality - Determination of organic carbon"
+        },
+        {
+          "name": "f_som",
+          "method": ""
+        },
+        {
+          "name": "f_c_in_som",
+          "method": ""
+        },
+        {
+          "name": "f_oc",
+          "method": ""
+        },
+        {
+          "name": "Data_reference",
+          "method": ""
+        }
+      ]
+    },
+    "relationships": []
+  },
+  "page_reuse": {
+    "context": {
+      "normalize_variable_name": {}
+    },
+    "column_sorting": {},
+    "unit_measurement": {},
+    "method_review": {}
+  },
+  "status": "ok"
+}
