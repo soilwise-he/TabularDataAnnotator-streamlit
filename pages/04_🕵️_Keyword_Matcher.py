@@ -12,6 +12,7 @@ from tqdm import tqdm
 import requests
 import ast
 import csv
+import sqlite3
 from ui.blocks import add_Soilwise_contact_sidebar,add_Soilwise_logo,add_clear_cache_button
 from pathlib import Path
 from typing import Optional, Sequence, Union
@@ -245,6 +246,45 @@ def load_vocab_indexes(modelname="all-MiniLM-L6-v2"):
             meta_data_dict[int(identifier)] = metadata
 
     return index_lib, meta_data_dict
+
+
+@st.cache_data(show_spinner=False)
+def load_ansis_unit_maps_from_sqlite(db_path: str = "data/vocabulary.sqlite"):
+    """Load ANSIS unit/kind metadata keyed by concept URI from SQLite."""
+    database_path = Path(db_path)
+    if not database_path.exists():
+        raise FileNotFoundError(f"Vocabulary SQLite database not found: {database_path}")
+
+    applicable_unit_map = {}
+    quantity_kind_map = {}
+
+    with sqlite3.connect(database_path) as con:
+        cur = con.cursor()
+        rows = cur.execute(
+            """
+            SELECT concept_uri, metadata_json
+            FROM vocabulary
+            WHERE lower(source_id) LIKE '%ansis%'
+            """
+        ).fetchall()
+
+    for concept_uri, metadata_json in rows:
+        if not metadata_json:
+            continue
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            continue
+
+        applicable_unit = metadata.get("applicable_unit") or metadata.get("applicableUnit")
+        quantity_kind = metadata.get("quantity_kind") or metadata.get("quantityKind")
+
+        if applicable_unit:
+            applicable_unit_map[concept_uri] = applicable_unit
+        if quantity_kind:
+            quantity_kind_map[concept_uri] = quantity_kind
+
+    return applicable_unit_map, quantity_kind_map
 
 def embed_vocab(word, definition=None, alpha=0.6):
     """
@@ -912,11 +952,15 @@ else:
 
     # Prep UoM section with Ansis links
     if st.session_state["vocab_oversized_matching_results"]:
-        
-        vocab_csv = r"data\partial_results.csv"
-        df_vocabs = read_csv_with_sniffer(Path(vocab_csv))
-        applicable_unit_map = df_vocabs.set_index("concept")["applicableUnit"].to_dict()
-        quantity_kind_map   = df_vocabs.set_index("concept")["quantityKind"].to_dict()
+
+        try:
+            applicable_unit_map, quantity_kind_map = load_ansis_unit_maps_from_sqlite()
+        except Exception as exc:
+            st.warning(
+                f"Could not load metadata from SQLite ({exc}). "
+                "Unit suggestions may be incomplete."
+            )
+            applicable_unit_map, quantity_kind_map = {}, {}
 
         for key, meta_df in meta_dict.items():
             if "ansis_UoM" not in st.session_state:
